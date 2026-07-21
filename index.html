@@ -1,0 +1,3145 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>지도 운전 게임</title>
+
+<!-- MapLibre GL JS: 지도를 그려주는 오픈소스 라이브러리 (CDN) -->
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<!-- turf.js: 위치와 도로 선(line) 사이의 실제 거리(미터)를 계산하기 위한 라이브러리 -->
+<script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
+
+<style>
+  /* ===== 기본 레이아웃 ===== */
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #0d1117;
+    font-family: -apple-system, BlinkMacSystemFont, "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    touch-action: none; /* 스크롤/확대 등 브라우저 기본 제스처 방지 */
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  #map {
+    position: fixed;
+    inset: 0;
+    opacity: 0; /* 처음엔 안 보이다가, 위치를 찾으면 서서히 나타남 */
+    transition: opacity 1.8s ease;
+  }
+  #map.revealed { opacity: 1; }
+
+  /* ===== 화면 정중앙 자동차 ===== */
+  #car {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    width: 14px;
+    height: 24px;
+    margin-top: -12px;
+    margin-left: -7px;
+    z-index: 500;
+    pointer-events: none;
+    transform: rotate(0deg);
+    transition: transform 0.05s linear;
+    filter: drop-shadow(0 2px 3px rgba(0,0,0,0.45));
+  }
+  #car svg { width: 100%; height: 100%; display: block; }
+
+  /* ===== 오른쪽 아래: 원형 핸들(투명 원) - 중심 기준 각도로 방향을 직접 조작 ===== */
+  #wheel-zone {
+    position: fixed;
+    right: 18px;
+    bottom: 24px;
+    width: 168px;
+    height: 168px;
+    z-index: 450;
+    touch-action: none;
+  }
+  #wheel-circle {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.55);
+    background: rgba(20,33,61,0.30);
+    box-sizing: border-box;
+  }
+  /* 위쪽(정면/0도)을 표시하는 작은 기준 눈금 */
+  #wheel-circle::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 6px;
+    width: 3px;
+    height: 12px;
+    margin-left: -1.5px;
+    background: rgba(255,255,255,0.6);
+    border-radius: 2px;
+  }
+  #wheel-center-dot {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 12px;
+    height: 12px;
+    margin-left: -6px;
+    margin-top: -6px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.55);
+  }
+  /* 현재 자동차 방향을 가리키는 바늘(needle): 자동차 아이콘과 항상 같은 각도로 회전 */
+  #wheel-needle {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 6px;
+    height: 44%;
+    margin-left: -3px;
+    background: #ffd166;
+    border-radius: 4px;
+    transform-origin: 50% 100%;
+    transform: translateY(-100%) rotate(0deg);
+  }
+
+  /* ===== 왼쪽 아래: 전진 / 멈춤 / 후진 버튼 ===== */
+  #controls {
+    position: fixed;
+    left: 14px;
+    bottom: 54px;
+    z-index: 600;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .ctrl-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: 11px;
+    border: none;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    box-shadow: 0 3px 8px rgba(0,0,0,0.4);
+    -webkit-tap-highlight-color: transparent;
+  }
+  .ctrl-btn:active { filter: brightness(1.25); }
+  #btn-forward { background: #2a7f62; }
+  #btn-stop    { background: #8a2c2c; }
+  #btn-reverse { background: #2c4d8a; }
+  .ctrl-btn.active-state {
+    outline: 2px solid #ffd166;
+    outline-offset: 2px;
+  }
+
+  /* ===== 전진 버튼 오른쪽: 최고속도 +/- 버튼 ===== */
+  #speed-controls {
+    position: fixed;
+    left: 61px;
+    bottom: 101px;
+    z-index: 600;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .speed-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: 11px;
+    border: none;
+    color: #fff;
+    font-size: 18px;
+    font-weight: 700;
+    background: #6b4fa0;
+    box-shadow: 0 3px 8px rgba(0,0,0,0.4);
+    -webkit-tap-highlight-color: transparent;
+  }
+  .speed-btn:active { filter: brightness(1.25); }
+
+  /* ===== 상단 정보 표시줄 (점수계 + 속도계를 나란히 배치) ===== */
+  #hud-row {
+    position: fixed;
+    top: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  #hud, #score-hud {
+    background: rgba(13,17,23,0.72);
+    color: #eaeaea;
+    padding: 8px 18px;
+    border-radius: 999px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  #score-hud {
+    color: #ffd166; /* 속도계와 구분되도록 점수는 살짝 강조 색상 */
+  }
+
+  /* ===== 우측 상단: 현재 웨이브 표시 ===== */
+  #wave-hud {
+    position: fixed;
+    top: 14px;
+    right: 14px;
+    z-index: 600;
+    background: rgba(13,17,23,0.72);
+    color: #7fd3ff;
+    padding: 8px 16px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  /* 속도 표시 바로 아래의 일시정지 버튼 */
+  #pause-btn {
+    position: fixed;
+    top: 58px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 650; /* 도로 이탈/체포 경고 배지보다 위에 오도록 */
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(13,17,23,0.72);
+    color: #eaeaea;
+    font-size: 15px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-tap-highlight-color: transparent;
+    box-shadow: 0 3px 8px rgba(0,0,0,0.4);
+  }
+  #pause-btn:active { filter: brightness(1.3); }
+  #pause-btn.is-paused {
+    background: rgba(42,127,98,0.9); /* 다시 재생할 수 있음을 알리는 초록색 */
+  }
+
+  #offroad-warning {
+    position: fixed;
+    top: 104px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 600;
+    background: rgba(200,40,40,0.85);
+    color: #fff;
+    padding: 6px 16px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+    display: none;
+  }
+
+  /* ===== 경찰차 & 추격(경찰과 도둑) 관련 ===== */
+  #police-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 480; /* 플레이어 차(500)보다는 아래, 지도(맵)보다는 위 */
+    pointer-events: none;
+  }
+  .police-car {
+    position: absolute;
+    width: 14px;
+    height: 24px;
+    left: 0;
+    top: 0;
+    filter: drop-shadow(0 2px 3px rgba(0,0,0,0.45));
+  }
+  .police-car svg { width: 100%; height: 100%; display: block; }
+  /* ===== 웨이브6+: 자유롭게 돌아다니는 "길막" 민간 차량(녹색, 경찰차와 동일한 크기) ===== */
+  .civilian-car {
+    position: absolute;
+    width: 14px;
+    height: 24px;
+    left: 0;
+    top: 0;
+    filter: drop-shadow(0 2px 3px rgba(0,0,0,0.45));
+  }
+  .civilian-car svg { width: 100%; height: 100%; display: block; }
+  /* ===== 웨이브4: 특수 경찰 트럭 (직사각형 장애물 차량) ===== */
+  .police-truck {
+    position: absolute;
+    width: 14px;
+    height: 44px;
+    left: 0;
+    top: 0;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+  }
+  .police-truck svg { width: 100%; height: 100%; display: block; }
+  /* ===== 웨이브6: 경찰 헬기 - 도로를 무시하고 하늘에서 플레이어에게 직진으로 접근 ===== */
+  .police-helicopter {
+    position: absolute;
+    width: 40px;
+    height: 40px;
+    left: 0;
+    top: 0;
+    filter: drop-shadow(0 4px 6px rgba(0,0,0,0.55));
+  }
+  .police-helicopter svg { width: 100%; height: 100%; display: block; }
+  /* 메인 로터: 늘 같은 속도로 계속 회전(기체 자체의 진행방향 회전과는 무관하게 별도로 빙글빙글 돎) */
+  .heli-rotor {
+    animation: heli-rotor-spin 0.2s linear infinite;
+    transform-origin: 20px 4px;
+  }
+  @keyframes heli-rotor-spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+  /* ===== 웨이브5: 스파이크 스트립(타이어 파열 장치) - 도로 위에 뿌려진 함정 ===== */
+  .spike-strip {
+    position: absolute;
+    width: 26px;
+    height: 12px;
+    left: 0;
+    top: 0;
+    pointer-events: none;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.5));
+  }
+  .spike-strip svg { width: 100%; height: 100%; display: block; }
+  /* 경광등 깜빡임: 빨강 ↔ 파랑 교차 */
+  .police-light {
+    animation: police-blink 0.5s steps(1) infinite;
+  }
+  @keyframes police-blink {
+    0%, 49%   { fill: #ff3b3b; }
+    50%, 100% { fill: #3b7bff; }
+  }
+  /* 경찰차 주변의 큰 원: 순찰 중엔 탐지 범위(초록 테두리만), 추격 중엔 체포 판정 범위(빨강 채움) */
+  .catch-circle {
+    position: absolute;
+    left: 0;
+    top: 0;
+    border-radius: 50%;
+    box-sizing: border-box;
+    pointer-events: none;
+  }
+  .catch-circle.mode-patrol {
+    background: transparent;               /* 요청대로 안쪽에는 색을 넣지 않음 */
+    border: 3px solid rgba(90, 255, 160, 0.95); /* 선만 초록색으로 - 숲 등 초록 배경에 묻히지 않도록 더 밝고 두껍게 */
+  }
+  .catch-circle.mode-chase {
+    background: rgba(255,40,40,0.16);
+    border: 2px solid rgba(255,60,60,0.55);
+  }
+
+  #catch-warning {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 601;
+    background: rgba(180,20,20,0.9);
+    color: #fff;
+    padding: 6px 18px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+    white-space: nowrap;
+    display: none;
+  }
+
+  #detected-warning {
+    position: fixed;
+    top: 100px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 602;
+    background: rgba(210,30,30,0.95);
+    color: #fff;
+    padding: 8px 22px;
+    border-radius: 999px;
+    font-size: 16px;
+    font-weight: 800;
+    display: none;
+    animation: detected-flash 0.35s steps(1) infinite;
+  }
+  @keyframes detected-flash {
+    0%, 49%   { background: rgba(210,30,30,0.95); }
+    50%, 100% { background: rgba(140,10,10,0.95); }
+  }
+
+  #caught-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: rgba(13,17,23,0.92);
+    color: #eaeaea;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 32px;
+    box-sizing: border-box;
+  }
+  #caught-overlay h1 { font-size: 22px; margin-bottom: 10px; color: #ff5a5f; }
+  #caught-overlay p { font-size: 14px; color: #a9b1bb; margin: 4px 0 26px; }
+  #caught-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: 100%;
+    max-width: 280px;
+  }
+  #caught-buttons button {
+    color: #fff;
+    border: none;
+    padding: 14px 26px;
+    border-radius: 999px;
+    font-size: 15px;
+    font-weight: 700;
+    width: 100%;
+  }
+  #restart-here-btn  { background: #2a7f62; } /* 이어서 계속(탈출) - 잡힌 위치에서 점수/웨이브 유지하고 재시작 - 주 액션 */
+  #restart-start-btn { background: #2a5f8f; } /* 현 지도에서 처음부터 다시 하기 - 이번 세션 시작 위치로, 점수/웨이브 초기화 */
+  #restart-main-btn  { background: #4a4f58; } /* 메인 화면(권한 화면)으로 이동 */
+
+  /* 게임 시작 시 "어느 나라/도시에서 출발했는지" 크게 보여주는 배너 */
+  #location-banner {
+    position: fixed;
+    top: 26%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 630; /* 카운트다운(620)보다 위, 체포 오버레이(1000)보다는 아래 */
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    text-align: center;
+    pointer-events: none;
+    text-shadow: 0 2px 12px rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,0.95);
+  }
+  #location-country {
+    font-size: 36px;
+    font-weight: 800;
+    color: #fff;
+    letter-spacing: 0.5px;
+  }
+  #location-city {
+    font-size: 19px;
+    font-weight: 600;
+    color: #ffd166;
+  }
+
+  /* 시작 시 자유 주행 카운트다운 */
+  #countdown-overlay {
+    position: fixed;
+    top: 90px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 620;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    pointer-events: none;
+  }
+  #countdown-number {
+    font-size: 44px;
+    font-weight: 800;
+    color: #fff;
+    background: rgba(20,110,70,0.85);
+    width: 74px;
+    height: 74px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+  }
+  #countdown-sub {
+    margin-top: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    color: #fff;
+    background: rgba(0,0,0,0.55);
+    padding: 4px 12px;
+    border-radius: 999px;
+  }
+
+  /* ===== 위치 권한 오버레이 ===== */
+  #permission-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: #0d1117;
+    color: #eaeaea;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 32px;
+    box-sizing: border-box;
+  }
+  #permission-overlay h1 { font-size: 20px; margin-bottom: 10px; }
+  #permission-overlay p { font-size: 14px; color: #a9b1bb; margin: 4px 0 26px; line-height: 1.5; }
+  #start-btn {
+    background: #2a7f62;
+    color: #fff;
+    border: none;
+    padding: 14px 26px;
+    border-radius: 999px;
+    font-size: 15px;
+    font-weight: 700;
+  }
+  #start-domestic-random-btn {
+    margin-top: 14px;
+    background: #8a6d2c;
+    color: #fff;
+    border: none;
+    padding: 14px 26px;
+    border-radius: 999px;
+    font-size: 15px;
+    font-weight: 700;
+  }
+  #start-domestic-random-btn:disabled,
+  #start-capital-btn:disabled,
+  #start-btn:disabled {
+    opacity: 0.55;
+  }
+  #start-capital-btn {
+    margin-top: 14px;
+    background: #2c4d8a;
+    color: #fff;
+    border: none;
+    padding: 14px 26px;
+    border-radius: 999px;
+    font-size: 15px;
+    font-weight: 700;
+  }
+  #permission-note {
+    margin-top: 16px;
+    font-size: 12px;
+    color: #6b7280;
+    min-height: 16px;
+  }
+</style>
+
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="지도 운전 게임">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#7c3aed">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <script>
+    if('serviceWorker' in navigator){
+      window.addEventListener('load',()=>{
+        navigator.serviceWorker.register('./service-worker.js');
+      });
+    }
+    window.addEventListener('beforeinstallprompt',e=>{
+      e.preventDefault();
+      window._pwaE=e;
+      var b=document.createElement('div');
+      b.style='position:fixed;bottom:0;left:0;right:0;background:#7c3aed;color:#fff;padding:18px;text-align:center;z-index:9999;font-size:15px;font-weight:bold;cursor:pointer;font-family:sans-serif;';
+      b.innerHTML='📲 홈화면에 앱 추가하기 · Add to Home Screen';
+      b.onclick=async function(){window._pwaE.prompt();var r=await window._pwaE.userChoice;if(r.outcome==='accepted')b.remove();};
+      document.body.appendChild(b);
+    });
+  </script>
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- 화면 중앙 고정 자동차 (SVG, 위에서 내려다본 형태) -->
+<div id="car">
+  <svg viewBox="0 0 34 58">
+    <path d="M17 1 C25 1 30 8 30 18 L30 46 C30 53 25 57 17 57 C9 57 4 53 4 46 L4 18 C4 8 9 1 17 1 Z"
+          fill="#ff5a5f" stroke="#7a1216" stroke-width="1.5"/>
+    <rect x="8" y="12" width="18" height="14" rx="3" fill="#1a2733" opacity="0.85"/>
+    <rect x="8" y="34" width="18" height="12" rx="3" fill="#1a2733" opacity="0.6"/>
+    <circle cx="17" cy="10" r="2.2" fill="#fff6c9"/>
+  </svg>
+</div>
+
+<div id="wheel-zone">
+  <div id="wheel-circle">
+    <div id="wheel-center-dot"></div>
+    <div id="wheel-needle"></div>
+  </div>
+</div>
+
+<div id="controls">
+  <button id="btn-forward" class="ctrl-btn">전진</button>
+  <button id="btn-stop" class="ctrl-btn active-state">멈춤</button>
+  <button id="btn-reverse" class="ctrl-btn">후진</button>
+</div>
+
+<div id="speed-controls">
+  <button id="btn-speed-up" class="speed-btn">+</button>
+  <button id="btn-speed-down" class="speed-btn">−</button>
+</div>
+
+<div id="hud-row">
+  <div id="score-hud">점수: 0</div>
+  <div id="hud">속도: 0 km/h</div>
+</div>
+<div id="wave-hud">1웨이브</div>
+<button id="pause-btn" aria-label="일시정지">⏸</button>
+<div id="offroad-warning">도로 이탈!</div>
+<div id="catch-warning">경찰에게 붙잡히는 중...</div>
+<div id="detected-warning">🚨 발각됨!</div>
+<div id="police-layer"></div>
+
+<div id="location-banner">
+  <div id="location-country"></div>
+  <div id="location-city"></div>
+</div>
+
+<div id="countdown-overlay">
+  <div id="countdown-number">10</div>
+  <div id="countdown-sub">자유 주행 시간! 이후 경찰 출동</div>
+</div>
+
+<div id="caught-overlay">
+  <h1>체포되었습니다!</h1>
+  <p>경찰차의 포위망 안에 5초를 초과해서 머물러 붙잡혔습니다.</p>
+  <div id="caught-buttons">
+    <button id="restart-here-btn">이어서 계속 (탈출)</button>
+    <button id="restart-start-btn">현 지도에서 처음부터 다시 하기</button>
+    <button id="restart-main-btn">메인화면으로 가기</button>
+  </div>
+</div>
+
+<div id="permission-overlay">
+  <h1>지도 운전 게임</h1>
+  <p>실제 지도 위에서 운전을 시작하려면<br/>내 위치 권한이 필요합니다.</p>
+  <button id="start-btn">현 위치에서 출발</button>
+  <button id="start-domestic-random-btn">국내에서 랜덤 출발</button>
+  <button id="start-capital-btn">해외 나라 수도에서 출발하기</button>
+  <div id="permission-note"></div>
+</div>
+
+<script>
+/* =========================================================
+   지도 운전 게임 - 메인 스크립트
+   - OpenFreeMap(무료, 키 불필요) 벡터 타일 + MapLibre GL JS 사용
+   - 자동차는 항상 화면 정중앙에 고정, 실제로 움직이는 건 "지도"
+   - 지도의 방위(bearing)는 항상 북쪽 고정, 자동차 아이콘 자체가 회전함
+   ========================================================= */
+
+// ---------- 1. 자동차 물리 상태 ----------
+const car = {
+  lat: 37.5665,      // 초기값(위치 권한 실패 시 서울시청으로 대체)
+  lng: 126.9780,
+  heading: 0,        // 0 = 북쪽, 시계방향 각도(도)
+  speed: 0,          // m/s (양수: 전진, 음수: 후진)
+  maxForwardSpeed: 80 / 3.6,   // 최고 전진 속도(m/s) - 기본 80km/h로 시작
+  maxReverseSpeed: 4.5, // 최고 후진 속도(m/s)
+  accel: 8,             // 가속도(m/s^2) - 경찰 추격전에서 너무 굼뜨지 않도록 기존(5)보다 상향
+  brakeDecel: 9,        // 멈춤 버튼일 때 감속도
+  knockbackTimer: 0,     // 남은 넉백 시간(초) - 0보다 크면 충돌로 튕겨나가는 중이라 조향/가속 입력이 무시됨
+  knockbackHeading: 0,   // 넉백 중 강제로 이동하는 방향(도)
+  knockbackSpeed: 0,     // 넉백 시작 속도(m/s) - 시간이 지날수록 0으로 감쇠
+  knockbackDuration: 0.45, // 이번 넉백의 총 지속시간(초) - 충돌 종류(경찰차/트럭)마다 다르므로, 이즈아웃 계산에 이 값을 써야 정확함
+  knockbackEndSpeed: 0,  // 넉백이 끝나는 순간의 속도(m/s) - 보통 0(완전 정지)이지만, 트럭 충돌처럼 "일정 속도만큼만 깎는" 피해는 0이 아닌 값을 넣는다
+  collisionAccelBoostTimer: 0, // 경찰차와 충돌한 직후 남은 시간(초) - 이 동안은 평소보다 훨씬 빠른 가속도로 재가속한다
+};
+
+let throttleMode = 'forward'; // 'forward' | 'stop' | 'reverse' - 시작하자마자 자동으로 전진
+
+// 화면에 그릴 때 쓰는 "연속된" 각도값. car.heading은 0~360으로 랩되지만,
+// 화면 회전 애니메이션은 0/360 경계에서 튀지 않도록 이 값으로 따로 관리한다.
+let visualHeading = 0;
+
+// ---------- 2. 지도 초기화 ----------
+const map = new maplibregl.Map({
+  container: 'map',
+  style: 'https://tiles.openfreemap.org/styles/liberty', // 무료 오픈프리맵 스타일
+  center: [car.lng, car.lat],
+  zoom: 16,
+  pitch: 0,           // 3D 기울임 없이 완전한 위에서 내려다보는 2D 시점
+  bearing: 0,         // 항상 북쪽 고정
+  interactive: false, // 사용자가 손가락으로 지도를 직접 움직이지 못하게 함(운전으로만 이동)
+  attributionControl: { compact: true }
+});
+
+// 위성사진 위에 실제 도로선만 겹쳐 보이는 화면을 만든다:
+// 1) Esri 위성 래스터 타일을 가장 아래에 깔고
+// 2) 기존 벡터 스타일의 배경/땅/건물 같은 "면(fill)" 레이어들은 위성사진을 가려버리므로 전부 숨기고
+// 3) 도로 강조선(drivable-road-highlight)만 위성사진 위에 그대로 남긴다 (지명/도로명 라벨도 유지)
+map.on('load', () => {
+  const style = map.getStyle();
+  // 스타일 안에서 vector 타입 소스를 자동으로 찾는다 (OpenFreeMap 내부 소스 이름 대비)
+  let vectorSourceId = null;
+  for (const key in style.sources) {
+    if (style.sources[key].type === 'vector') { vectorSourceId = key; break; }
+  }
+
+  // ---- 1) 무료 위성 타일(Esri World Imagery, API 키 불필요) 추가 ----
+  map.addSource('esri-satellite', {
+    type: 'raster',
+    tiles: [
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+    ],
+    tileSize: 256,
+    attribution: 'Esri, Maxar, Earthstar Geographics'
+  });
+  const bottomLayerId = style.layers.length ? style.layers[0].id : undefined;
+  map.addLayer({
+    id: 'esri-satellite-layer',
+    type: 'raster',
+    source: 'esri-satellite',
+    paint: { 'raster-opacity': 1 }
+  }, bottomLayerId); // 스타일의 가장 아래(첫 레이어) 자리에 삽입 = 배경처럼 깔림
+
+  // ---- 2) 위성사진을 가리는 배경/땅/건물 등 "면" 레이어는 숨김 (라벨은 남겨서 지명 파악 가능하게 함) ----
+  style.layers.forEach((layer) => {
+    if (layer.type === 'background' || layer.type === 'fill' || layer.type === 'fill-extrusion' || layer.type === 'line') {
+      map.setLayoutProperty(layer.id, 'visibility', 'none');
+    }
+  });
+
+  // ---- 3) 실제 도로 벡터 선을, 위성사진 위에서도 눈에 잘 띄는 색으로 강조해서 그린다 ----
+  //    (단, "운전 가능한 도로"만 필터링해서 표시: 인도/자전거길/계단/철도/트램/페리 등은 제외)
+  if (vectorSourceId) {
+    map.addLayer({
+      id: 'drivable-road-highlight',
+      type: 'line',
+      source: vectorSourceId,
+      'source-layer': 'transportation', // OpenMapTiles 스키마의 도로 레이어명
+      // OpenMapTiles의 'class' 속성 중, 자동차가 실제로 다닐 수 있는 도로 종류만 남긴다.
+      // 제외되는 것들: path(오솔길), footway(인도), cycleway(자전거도로), steps(계단), pedestrian(보행자전용구역),
+      //              bridleway(승마도로), track(비포장 농로), rail/tram/subway/light_rail/monorail/funicular(철도류),
+      //              ferry(뱃길), aerialway(케이블카), raceway(경주트랙)
+      filter: ['match', ['get', 'class'],
+        ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'minor', 'service'],
+        true,
+        false
+      ],
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': '#ffcc00',
+        'line-opacity': 0.5,
+        'line-width': [
+          'interpolate', ['linear'], ['zoom'],
+          14, 3,
+          17, 12,
+          20, 24
+        ]
+      }
+    });
+  }
+});
+
+// ---------- 3. 위치 권한 요청 및 시작 ----------
+const overlay = document.getElementById('permission-overlay');
+const noteEl = document.getElementById('permission-note');
+const mapEl = document.getElementById('map');
+
+// 화면 중앙에 국가명(크게) + 도시명(작게)을 3초간 보여주고 사라지는 배너.
+// "지도와 자동차가 함께 화면에 나타나는 시점"에 호출해서 쓴다.
+let locationBannerHideTimer = null;
+function showLocationBanner(country, city) {
+  const banner = document.getElementById('location-banner');
+  document.getElementById('location-country').textContent = country || '';
+  document.getElementById('location-city').textContent = city || '';
+  banner.style.display = 'flex';
+  banner.style.opacity = '1';
+  if (locationBannerHideTimer) clearTimeout(locationBannerHideTimer);
+  locationBannerHideTimer = setTimeout(() => {
+    banner.style.display = 'none';
+  }, 3000); // 요청대로 3초간 노출 후 사라짐
+}
+
+// ---------- 3-0. "국내에서 랜덤 출발" 기능 ----------
+// 예전에는 대한민국 전체 경계 상자(bounding box) 안에서 완전히 무작위로 좌표를 뽑았는데,
+// 그러다 보니 바다나 산 한복판이 뽑히는 경우가 많았다.
+// 이제는 아래(KOREA_CITY_HALLS)에 정리해 둔 "실제 도청/시청 좌표" 중에서만 무작위로 고르므로,
+// 항상 도심 한복판(도로가 확실히 있는 곳)에서 시작하게 된다.
+
+// 지정한 좌표로 지도를 옮긴 뒤, 화면에 실제 "운전 가능한 도로"가 보이는지 확인한다.
+// (map.once('idle')로 벡터 타일 로딩이 끝나길 기다린 다음 조회해야 정확하다)
+//
+// [수정 이유] 예전에는 줌 14로 화면 전체를 봐서 "화면 어딘가에 도로가 조금이라도 보이면" 통과 처리했다.
+// 그런데 실제 게임 시작(beginGame)은 줌 16으로 훨씬 좁게 확대해서 그 지점 바로 위에 차를 스냅한다.
+// 즉 줌14 화면 구석에 멀리 떨어진 해안도로가 살짝 걸쳐 보이는 것만으로 통과됐다가,
+// 막상 줌16으로 확대하면 그 도로가 화면 밖으로 벗어나 스냅할 도로가 하나도 없어서
+// 차가 바다/숲 한복판에 그대로 남는 문제가 있었다(스크린샷에서 보고된 현상).
+// → 검사 시점의 줌을 beginGame과 동일한 16으로 맞추고, 화면 전체가 아니라
+//   "후보 지점을 중심으로 한 좁은 박스"만 검사해서, 정말로 그 지점 근처에 도로가 있는 경우만 통과시킨다.
+function hasRoadsNear(lat, lng) {
+  const CHECK_ZOOM = 16; // beginGame()에서 실제로 사용하는 최종 줌과 동일하게 맞춤
+  return new Promise((resolve) => {
+    map.once('idle', () => {
+      let feats;
+      try {
+        // 화면 정중앙(=후보 좌표) 주변 절반 크기의 박스만 검사.
+        // 화면 전체가 아니라 중앙 위주로 좁혀서, "화면 구석에만 도로가 있는" 케이스를 걸러낸다.
+        const cx = window.innerWidth / 2;
+        const cy = window.innerHeight / 2;
+        const halfW = window.innerWidth * 0.35;
+        const halfH = window.innerHeight * 0.35;
+        feats = map.queryRenderedFeatures(
+          [[cx - halfW, cy - halfH], [cx + halfW, cy + halfH]],
+          { layers: ['drivable-road-highlight'] }
+        );
+      } catch (e) { feats = null; }
+      resolve(!!(feats && feats.length > 0));
+    });
+    map.jumpTo({ center: [lng, lat], zoom: CHECK_ZOOM, bearing: 0, pitch: 0 });
+  });
+}
+
+// "국내에서 랜덤 출발"은 더 이상 임의의 좌표(바다/산 등)를 뽑지 않고,
+// 아래처럼 실제 대한민국의 도청·광역시청·시청 좌표 목록 안에서만 무작위로 고른다.
+// - 광역자치단체 도청 9곳(경기/강원특별자치도/충북/충남/전북특별자치도/전남/경북/경남/제주특별자치도)
+// - 광역자치단체 시청 8곳(서울/부산/대구/인천/광주/대전/울산/세종)
+// - 기초자치단체 시청(전국의 모든 "시") + 제주도의 행정시(제주시/서귀포시) 약 77곳
+// 총 약 94곳. (참고: "군청"까지 포함하면 150곳을 훌쩍 넘지만, 요청하신 "도청/시청" 기준으로는
+// 전국에 정확히 이 정도 숫자만 존재한다.)
+const KOREA_CITY_HALLS = [
+  // ---- 도청(9) ----
+  { name: '경기도청', lat: 37.2750, lng: 127.0139 },
+  { name: '강원특별자치도청', lat: 37.8813, lng: 127.7298 },
+  { name: '충청북도청', lat: 36.6357, lng: 127.4913 },
+  { name: '충청남도청', lat: 36.6588, lng: 126.6733 },
+  { name: '전북특별자치도청', lat: 35.8203, lng: 127.1088 },
+  { name: '전라남도청', lat: 34.8161, lng: 126.4629 },
+  { name: '경상북도청', lat: 36.5760, lng: 128.5056 },
+  { name: '경상남도청', lat: 35.2281, lng: 128.6811 },
+  { name: '제주특별자치도청', lat: 33.4996, lng: 126.5312 },
+  // ---- 광역시/특별시/특별자치시청(8) ----
+  { name: '서울특별시청', lat: 37.5665, lng: 126.9780 },
+  { name: '부산광역시청', lat: 35.1796, lng: 129.0756 },
+  { name: '대구광역시청', lat: 35.8714, lng: 128.6014 },
+  { name: '인천광역시청', lat: 37.4563, lng: 126.7052 },
+  { name: '광주광역시청', lat: 35.1600, lng: 126.8514 },
+  { name: '대전광역시청', lat: 36.3504, lng: 127.3845 },
+  { name: '울산광역시청', lat: 35.5384, lng: 129.3114 },
+  { name: '세종특별자치시청', lat: 36.4801, lng: 127.2891 },
+  // ---- 경기도 시청(28) ----
+  { name: '수원시청', lat: 37.2636, lng: 127.0286 },
+  { name: '성남시청', lat: 37.4201, lng: 127.1262 },
+  { name: '의정부시청', lat: 37.7381, lng: 127.0338 },
+  { name: '안양시청', lat: 37.3943, lng: 126.9568 },
+  { name: '부천시청', lat: 37.5036, lng: 126.7660 },
+  { name: '광명시청', lat: 37.4787, lng: 126.8646 },
+  { name: '평택시청', lat: 36.9921, lng: 127.1129 },
+  { name: '동두천시청', lat: 37.9036, lng: 127.0605 },
+  { name: '안산시청', lat: 37.3219, lng: 126.8309 },
+  { name: '고양시청', lat: 37.6584, lng: 126.8320 },
+  { name: '과천시청', lat: 37.4292, lng: 126.9877 },
+  { name: '구리시청', lat: 37.5943, lng: 127.1296 },
+  { name: '남양주시청', lat: 37.6360, lng: 127.2165 },
+  { name: '오산시청', lat: 37.1499, lng: 127.0772 },
+  { name: '시흥시청', lat: 37.3801, lng: 126.8027 },
+  { name: '군포시청', lat: 37.3616, lng: 126.9352 },
+  { name: '의왕시청', lat: 37.3446, lng: 126.9683 },
+  { name: '하남시청', lat: 37.5393, lng: 127.2148 },
+  { name: '용인시청', lat: 37.2410, lng: 127.1776 },
+  { name: '파주시청', lat: 37.7602, lng: 126.7802 },
+  { name: '이천시청', lat: 37.2724, lng: 127.4351 },
+  { name: '안성시청', lat: 37.0079, lng: 127.2799 },
+  { name: '김포시청', lat: 37.6153, lng: 126.7157 },
+  { name: '화성시청', lat: 37.1996, lng: 126.8317 },
+  { name: '광주시청(경기)', lat: 37.4295, lng: 127.2551 },
+  { name: '양주시청', lat: 37.7852, lng: 127.0453 },
+  { name: '포천시청', lat: 37.8949, lng: 127.2003 },
+  { name: '여주시청', lat: 37.2984, lng: 127.6372 },
+  // ---- 강원특별자치도 시청(7) ----
+  { name: '춘천시청', lat: 37.8813, lng: 127.7298 },
+  { name: '원주시청', lat: 37.3422, lng: 127.9202 },
+  { name: '강릉시청', lat: 37.7519, lng: 128.8761 },
+  { name: '동해시청', lat: 37.5247, lng: 129.1143 },
+  { name: '태백시청', lat: 37.1641, lng: 128.9856 },
+  { name: '속초시청', lat: 38.2070, lng: 128.5918 },
+  { name: '삼척시청', lat: 37.4500, lng: 129.1653 },
+  // ---- 충청북도 시청(3) ----
+  { name: '청주시청', lat: 36.6424, lng: 127.4890 },
+  { name: '충주시청', lat: 36.9910, lng: 127.9259 },
+  { name: '제천시청', lat: 37.1326, lng: 128.1911 },
+  // ---- 충청남도 시청(8) ----
+  { name: '천안시청', lat: 36.8151, lng: 127.1139 },
+  { name: '공주시청', lat: 36.4465, lng: 127.1191 },
+  { name: '보령시청', lat: 36.3332, lng: 126.6128 },
+  { name: '아산시청', lat: 36.7898, lng: 127.0018 },
+  { name: '서산시청', lat: 36.7848, lng: 126.4503 },
+  { name: '논산시청', lat: 36.1872, lng: 127.0987 },
+  { name: '계룡시청', lat: 36.2745, lng: 127.2487 },
+  { name: '당진시청', lat: 36.8930, lng: 126.6293 },
+  // ---- 전북특별자치도 시청(6) ----
+  { name: '전주시청', lat: 35.8242, lng: 127.1480 },
+  { name: '군산시청', lat: 35.9676, lng: 126.7369 },
+  { name: '익산시청', lat: 35.9483, lng: 126.9575 },
+  { name: '정읍시청', lat: 35.5699, lng: 126.8559 },
+  { name: '남원시청', lat: 35.4164, lng: 127.3905 },
+  { name: '김제시청', lat: 35.8034, lng: 126.8809 },
+  // ---- 전라남도 시청(5) ----
+  { name: '목포시청', lat: 34.7936, lng: 126.3928 },
+  { name: '여수시청', lat: 34.7604, lng: 127.6622 },
+  { name: '순천시청', lat: 34.9506, lng: 127.4872 },
+  { name: '나주시청', lat: 35.0158, lng: 126.7108 },
+  { name: '광양시청', lat: 34.9407, lng: 127.6957 },
+  // ---- 경상북도 시청(10) ----
+  { name: '포항시청', lat: 36.0322, lng: 129.3652 },
+  { name: '경주시청', lat: 35.8562, lng: 129.2247 },
+  { name: '김천시청', lat: 36.1398, lng: 128.1136 },
+  { name: '안동시청', lat: 36.5684, lng: 128.7294 },
+  { name: '구미시청', lat: 36.1196, lng: 128.3444 },
+  { name: '영주시청', lat: 36.8055, lng: 128.6240 },
+  { name: '영천시청', lat: 35.9733, lng: 128.9386 },
+  { name: '상주시청', lat: 36.4109, lng: 128.1590 },
+  { name: '문경시청', lat: 36.5866, lng: 128.1867 },
+  { name: '경산시청', lat: 35.8251, lng: 128.7414 },
+  // ---- 경상남도 시청(8) ----
+  { name: '창원시청', lat: 35.2280, lng: 128.6817 },
+  { name: '진주시청', lat: 35.1800, lng: 128.1076 },
+  { name: '통영시청', lat: 34.8544, lng: 128.4331 },
+  { name: '사천시청', lat: 35.0034, lng: 128.0642 },
+  { name: '김해시청', lat: 35.2285, lng: 128.8894 },
+  { name: '밀양시청', lat: 35.5038, lng: 128.7469 },
+  { name: '거제시청', lat: 34.8806, lng: 128.6212 },
+  { name: '양산시청', lat: 35.3350, lng: 129.0374 },
+  // ---- 제주특별자치도 행정시(2) ----
+  { name: '제주시청', lat: 33.4996, lng: 126.5312 },
+  { name: '서귀포시청', lat: 33.2540, lng: 126.5600 },
+];
+
+const domesticRandomBtn = document.getElementById('start-domestic-random-btn');
+domesticRandomBtn.addEventListener('click', async () => {
+  // GPS나 역지오코딩 없이 바로 시작할 수 있으므로, 버튼들만 잠시 비활성화해둔다.
+  document.getElementById('start-btn').disabled = true;
+  document.getElementById('start-capital-btn').disabled = true;
+  domesticRandomBtn.disabled = true;
+  noteEl.textContent = '전국 도청·시청 중 한 곳을 고르는 중...';
+
+  // 목록을 무작위 순서로 섞어서, 앞에서부터 순서대로 "그 지점 주변에 실제 도로가 있는지" 확인한다.
+  // (시청 좌표 자체는 항상 도심 한복판이라 대부분 첫 시도에서 바로 통과하지만,
+  //  혹시 좌표 오차로 도로 인식이 안 되는 경우를 대비해 다음 후보로 재시도한다.)
+  const shuffled = [...KOREA_CITY_HALLS].sort(() => Math.random() - 0.5);
+  let chosen = null;
+  let chosenName = '';
+  const MAX_TRIES = 15;
+  for (let i = 0; i < Math.min(MAX_TRIES, shuffled.length) && !chosen; i++) {
+    const spot = shuffled[i];
+    // 매번 정확히 같은 지점(청사 정문)에서 시작하지 않도록, 반경 약 300m 이내에서 살짝 흩어준다.
+    const candLat = spot.lat + (Math.random() - 0.5) * 0.006;
+    const candLng = spot.lng + (Math.random() - 0.5) * 0.006;
+    const ok = await hasRoadsNear(candLat, candLng);
+    if (ok) {
+      chosen = { lat: candLat, lng: candLng };
+      chosenName = spot.name;
+    }
+  }
+  if (!chosen) {
+    // 극히 드물게 15곳 모두 실패하면, 첫 후보의 좌표 그대로 사용(청사 정문은 항상 도로에 붙어 있음)
+    const spot = shuffled[0];
+    chosen = { lat: spot.lat, lng: spot.lng };
+    chosenName = spot.name;
+  }
+
+  car.lat = chosen.lat;
+  car.lng = chosen.lng;
+  noteEl.textContent = `${chosenName} 근처에서 출발합니다...`;
+
+  document.getElementById('start-btn').disabled = false;
+  document.getElementById('start-capital-btn').disabled = false;
+  domesticRandomBtn.disabled = false;
+  setTimeout(() => beginGame({ country: '대한민국', city: chosenName }), 700);
+});
+
+// ---------- 3-1. "해외 나라 수도에서 출발하기" 기능 ----------
+// 도로망이 잘 구성되어 있고(선진국/주요 신흥국 위주) GDP(명목 기준) 상위권인 나라 50곳의 수도 좌표.
+// 한국(서울)은 "해외"가 아니므로 목록에서 제외했다.
+const CAPITAL_CITIES = [
+  { country: '미국',        city: '워싱턴 D.C.', lat: 38.9072,  lng: -77.0369 },
+  { country: '중국',        city: '베이징',       lat: 39.9042,  lng: 116.4074 },
+  { country: '독일',        city: '베를린',       lat: 52.5200,  lng: 13.4050 },
+  { country: '일본',        city: '도쿄',         lat: 35.6762,  lng: 139.6503 },
+  { country: '인도',        city: '뉴델리',       lat: 28.6139,  lng: 77.2090 },
+  { country: '영국',        city: '런던',         lat: 51.5074,  lng: -0.1278 },
+  { country: '프랑스',      city: '파리',         lat: 48.8566,  lng: 2.3522 },
+  { country: '이탈리아',    city: '로마',         lat: 41.9028,  lng: 12.4964 },
+  { country: '캐나다',      city: '오타와',       lat: 45.4215,  lng: -75.6972 },
+  { country: '브라질',      city: '브라질리아',   lat: -15.8267, lng: -47.9218 },
+  { country: '러시아',      city: '모스크바',     lat: 55.7558,  lng: 37.6173 },
+  { country: '멕시코',      city: '멕시코시티',   lat: 19.4326,  lng: -99.1332 },
+  { country: '호주',        city: '캔버라',       lat: -35.2809, lng: 149.1300 },
+  { country: '스페인',      city: '마드리드',     lat: 40.4168,  lng: -3.7038 },
+  { country: '인도네시아',  city: '자카르타',     lat: -6.2088,  lng: 106.8456 },
+  { country: '네덜란드',    city: '암스테르담',   lat: 52.3676,  lng: 4.9041 },
+  { country: '사우디아라비아', city: '리야드',    lat: 24.7136,  lng: 46.6753 },
+  { country: '튀르키예',    city: '앙카라',       lat: 39.9334,  lng: 32.8597 },
+  { country: '스위스',      city: '베른',         lat: 46.9480,  lng: 7.4474 },
+  { country: '폴란드',      city: '바르샤바',     lat: 52.2297,  lng: 21.0122 },
+  { country: '아르헨티나',  city: '부에노스아이레스', lat: -34.6037, lng: -58.3816 },
+  { country: '벨기에',      city: '브뤼셀',       lat: 50.8503,  lng: 4.3517 },
+  { country: '스웨덴',      city: '스톡홀름',     lat: 59.3293,  lng: 18.0686 },
+  { country: '아일랜드',    city: '더블린',       lat: 53.3498,  lng: -6.2603 },
+  { country: '태국',        city: '방콕',         lat: 13.7563,  lng: 100.5018 },
+  { country: '노르웨이',    city: '오슬로',       lat: 59.9139,  lng: 10.7522 },
+  { country: '싱가포르',    city: '싱가포르',     lat: 1.3521,   lng: 103.8198 },
+  { country: '오스트리아',  city: '비엔나',       lat: 48.2082,  lng: 16.3738 },
+  { country: '아랍에미리트', city: '아부다비',    lat: 24.4539,  lng: 54.3773 },
+  { country: '필리핀',      city: '마닐라',       lat: 14.5995,  lng: 120.9842 },
+  { country: '말레이시아',  city: '쿠알라룸푸르', lat: 3.1390,   lng: 101.6869 },
+  { country: '방글라데시',  city: '다카',         lat: 23.8103,  lng: 90.4125 },
+  { country: '덴마크',      city: '코펜하겐',     lat: 55.6761,  lng: 12.5683 },
+  { country: '남아프리카공화국', city: '프리토리아', lat: -25.7479, lng: 28.2293 },
+  { country: '콜롬비아',    city: '보고타',       lat: 4.7110,   lng: -74.0721 },
+  { country: '이집트',      city: '카이로',       lat: 30.0444,  lng: 31.2357 },
+  { country: '핀란드',      city: '헬싱키',       lat: 60.1699,  lng: 24.9384 },
+  { country: '칠레',        city: '산티아고',     lat: -33.4489, lng: -70.6693 },
+  { country: '루마니아',    city: '부쿠레슈티',   lat: 44.4268,  lng: 26.1025 },
+  { country: '체코',        city: '프라하',       lat: 50.0755,  lng: 14.4378 },
+  { country: '포르투갈',    city: '리스본',       lat: 38.7223,  lng: -9.1393 },
+  { country: '페루',        city: '리마',         lat: -12.0464, lng: -77.0428 },
+  { country: '뉴질랜드',    city: '웰링턴',       lat: -41.2865, lng: 174.7762 },
+  { country: '베트남',      city: '하노이',       lat: 21.0278,  lng: 105.8342 },
+  { country: '카자흐스탄',  city: '아스타나',     lat: 51.1694,  lng: 71.4491 },
+  { country: '헝가리',      city: '부다페스트',   lat: 47.4979,  lng: 19.0402 },
+  { country: '우크라이나',  city: '키이우',       lat: 50.4501,  lng: 30.5234 },
+  { country: '그리스',      city: '아테네',       lat: 37.9838,  lng: 23.7275 },
+  { country: '카타르',      city: '도하',         lat: 25.2854,  lng: 51.5310 },
+  { country: '이스라엘',    city: '예루살렘',     lat: 31.7683,  lng: 35.2137 },
+];
+
+document.getElementById('start-capital-btn').addEventListener('click', () => {
+  // 목록에서 무작위로 한 나라를 골라, GPS 없이 곧바로 그 수도 좌표에서 시작한다.
+  const pick = CAPITAL_CITIES[Math.floor(Math.random() * CAPITAL_CITIES.length)];
+  car.lat = pick.lat;
+  car.lng = pick.lng;
+  noteEl.textContent = `${pick.country} ${pick.city}에서 출발합니다...`;
+  setTimeout(() => beginGame({ country: pick.country, city: pick.city }), 600); // 안내 문구를 잠깐 보여준 뒤 시작 (beginGame 안에서 도로 위로 자동 스냅됨)
+});
+
+document.getElementById('start-btn').addEventListener('click', () => {
+  noteEl.textContent = '내 위치를 확인하는 중...';
+  if (!navigator.geolocation) {
+    startWithFallback('이 브라우저는 위치 확인을 지원하지 않아 서울시청 근처에서 시작합니다.');
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      car.lat = pos.coords.latitude;
+      car.lng = pos.coords.longitude;
+      beginGame();
+    },
+    (err) => {
+      startWithFallback('위치 권한이 거부되어 서울시청 근처에서 시작합니다.');
+    },
+    { enableHighAccuracy: true, timeout: 8000 }
+  );
+});
+
+function startWithFallback(message) {
+  noteEl.textContent = message;
+  setTimeout(beginGame, 900); // 안내 문구를 잠깐 보여준 뒤 시작
+}
+
+function beginGame(locationInfo) {
+  overlay.style.display = 'none';
+  // 낮은 줌에서 자세히 확대된 줌으로 서서히 이동하며 "지도가 점차 나타나는" 연출
+  map.jumpTo({ center: [car.lng, car.lat], zoom: 14, bearing: 0, pitch: 0 });
+  mapEl.classList.add('revealed');
+  // 지도(위성사진)가 서서히 나타나기 시작하고, 화면 중앙의 자동차도 이 순간 함께 보이기 시작하므로,
+  // "국내에서 랜덤 출발"/"해외 나라 수도에서 출발" 버튼으로 시작한 경우에는 바로 이 타이밍에 배너를 띄운다.
+  if (locationInfo) showLocationBanner(locationInfo.country, locationInfo.city);
+  map.flyTo({
+    center: [car.lng, car.lat],
+    zoom: 16,          // 요청에 따라 조정
+    bearing: 0,
+    pitch: 0,         // 3D 없이 완전한 탑다운 2D
+    speed: 0.6,
+    essential: true
+  });
+  // 중요: flyTo 확대 애니메이션이 "끝난 뒤"에 게임 루프를 시작해야 함.
+  // 게임 루프가 매 프레임 jumpTo(중심좌표만)를 호출하는데, 이걸 애니메이션 도중에 실행하면
+  // flyTo가 중간에 끊겨서 줌이 낮은 상태로 멈춰버리는 문제가 있었음(그래서 지도가 넓게 보였음).
+  map.once('moveend', () => {
+    // 실제 위치(또는 해외 수도처럼 방금 순간이동한 새 지역)가 도로 밖(건물 안 등)이어도 도로 위에서 시작하도록 보정.
+    // 새 지역으로 막 이동한 직후에는 도로 벡터 타일이 아직 다 로딩되지 않아 스냅이 한 번에 실패할 수 있으므로,
+    // "게임을 시작하는 이 순간"에 한해서만 짧은 간격으로 여러 번 재시도한다(재시작/체포 후 등 다른 시점에는 영향 없음).
+    trySnapWithRetry(0);
+
+    function trySnapWithRetry(attempt) {
+      const snapped = snapCarToNearestRoad();
+      const maxAttempts = 10; // 최대 10번, 200ms 간격 → 최대 약 2초까지 도로 타일 로딩을 기다림
+      if (!snapped && attempt < maxAttempts) {
+        setTimeout(() => trySnapWithRetry(attempt + 1), 200);
+        return;
+      }
+      initialLat = car.lat;    // "처음 위치로 돌아가기" 버튼을 위해, 최초 시작 위치/방향을 기억해둔다
+      initialLng = car.lng;
+      initialHeading = car.heading;
+      startPoliceCountdown(); // 자유 주행 카운트다운 시작 → 끝나면 경찰차 스폰
+      requestAnimationFrame(gameLoop);
+    }
+  });
+}
+
+// 자동차의 시작 위치가 도로 위가 아니라면(집/건물 안에서 실행하는 경우 등),
+// 현재 화면에 보이는 도로 중 가장 가까운 지점으로 위치를 옮기고, 그 도로 방향으로 머리를 맞춘다.
+// 반환값: 스냅에 성공했으면 true, (아직 도로 타일이 안 그려졌거나 화면에 도로가 없어서) 실패했으면 false.
+function snapCarToNearestRoad() {
+  if (typeof turf === 'undefined') return false; // 라이브러리 로드 실패 시 원래 위치 그대로 시작
+
+  let feats;
+  try {
+    // 화면 전체 범위에서 도로 강조 레이어를 조회 (시작 지점 근처에 국한하지 않고 넓게 탐색)
+    feats = map.queryRenderedFeatures(
+      [[0, 0], [window.innerWidth, window.innerHeight]],
+      { layers: ['drivable-road-highlight'] }
+    );
+  } catch (e) { return false; }
+  if (!feats || feats.length === 0) return false; // 화면 안에 도로 자체가 안 보이면(아직 타일 로딩 중일 수 있음) 스냅 실패
+
+  const carPoint = turf.point([car.lng, car.lat]);
+  let best = null;
+  let bestDist = Infinity;
+  for (const f of feats) {
+    try {
+      const snapped = turf.nearestPointOnLine(f, carPoint, { units: 'meters' });
+      if (snapped.properties.dist < bestDist) {
+        bestDist = snapped.properties.dist;
+        best = { snapped, feature: f };
+      }
+    } catch (e) { /* 도형 형식이 안 맞으면 건너뜀 */ }
+  }
+  if (!best) return false;
+
+  // 자동차 위치를 도로 위 가장 가까운 지점으로 이동
+  const [snapLng, snapLat] = best.snapped.geometry.coordinates;
+  car.lat = snapLat;
+  car.lng = snapLng;
+
+  // 스냅된 지점 주변 도로의 방향으로 자동차 머리를 맞춰줌 (LineString인 경우에만 계산)
+  try {
+    const coords = best.feature.geometry.coordinates;
+    if (best.feature.geometry.type === 'LineString') {
+      const idx = best.snapped.properties.index;
+      const a = coords[idx];
+      const b = coords[Math.min(idx + 1, coords.length - 1)];
+      if (a && b) {
+        const bearing = turf.bearing(turf.point(a), turf.point(b));
+        car.heading = (bearing + 360) % 360;
+        visualHeading = car.heading;
+      }
+    }
+  } catch (e) { /* 방향 계산에 실패해도 위치 스냅은 그대로 유지 */ }
+
+  map.jumpTo({ center: [car.lng, car.lat] });
+  return true;
+}
+
+// 경찰차 한 대를 플레이어 주변의 지정된 방향(baseBearing) 근처, 무작위 거리에 스폰시키고
+// (가능하면) 가장 가까운 도로 위로 스냅한 뒤, 화면에 표시할 DOM 요소도 함께 만들어 policeCars 배열에 추가한다.
+// - 최초 스폰(spawnPoliceCars)과, 웨이브2에서 경찰차를 추가로 투입할 때 공통으로 사용한다.
+function createPoliceCar(baseBearing) {
+  const layer = document.getElementById('police-layer');
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos(car.lat * Math.PI / 180);
+
+  let lat = null, lng = null, bearingDeg = 0;
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const tryBearing = baseBearing + (Math.random() * 60 - 30);
+    const tryDist = POLICE_SPAWN_MIN_DIST_M + Math.random() * (POLICE_SPAWN_MAX_DIST_M - POLICE_SPAWN_MIN_DIST_M);
+    const bearingRad = tryBearing * Math.PI / 180;
+    const tryLat = car.lat + (tryDist * Math.cos(bearingRad)) / metersPerDegLat;
+    const tryLng = car.lng + (tryDist * Math.sin(bearingRad)) / metersPerDegLng;
+
+    const roadInfo = findRoadPointNear(tryLat, tryLng, 35); // 후보 지점에서 35m 이내에 실제 도로가 있어야 인정
+    if (roadInfo) {
+      lat = roadInfo.lat;
+      lng = roadInfo.lng;
+      bearingDeg = tryBearing;
+      break;
+    }
+  }
+  // 25번 시도해도 도로를 못 찾았다면(강/공터가 아주 넓은 경우), 최후의 수단으로
+  // 플레이어가 서 있는 도로(항상 도로 위로 보정되어 있음) 바로 근처에 배치한다.
+  if (lat === null) {
+    const fallback = findRoadPointNear(car.lat, car.lng, 200) || { lat: car.lat, lng: car.lng };
+    lat = fallback.lat;
+    lng = fallback.lng;
+    bearingDeg = baseBearing;
+  }
+
+  const el = document.createElement('div');
+  el.className = 'police-car';
+  el.innerHTML = `
+    <svg viewBox="0 0 34 58">
+      <path d="M17 1 C25 1 30 8 30 18 L30 46 C30 53 25 57 17 57 C9 57 4 53 4 46 L4 18 C4 8 9 1 17 1 Z"
+            fill="#274b8f" stroke="#0f2452" stroke-width="1.5"/>
+      <rect x="8" y="12" width="18" height="14" rx="3" fill="#1a2733" opacity="0.85"/>
+      <rect x="8" y="34" width="18" height="12" rx="3" fill="#1a2733" opacity="0.6"/>
+      <rect class="police-light" x="10" y="24" width="14" height="5" rx="1.5" fill="#ff3b3b"/>
+    </svg>`;
+  layer.appendChild(el);
+
+  const circleEl = document.createElement('div');
+  circleEl.className = 'catch-circle mode-chase'; // 발각 시스템을 없앴으므로, 스폰되자마자 바로 "추격" 상태(빨간 원)로 시작
+
+  layer.appendChild(circleEl);
+
+  policeCars.push({
+    lat, lng, heading: bearingDeg, speed: 0, el, circleEl, farTimer: 0,
+    lastGoodLat: lat, lastGoodLng: lng, // 마지막으로 확인된 "도로 위" 좌표 (건물/강 등으로 새는 것을 막는 기준점)
+    state: 'chase',                     // 발각 시스템 제거: 스폰과 동시에 항상 'chase'(추격) 상태로 시작한다
+    wanderHeading: bearingDeg,           // 순찰 중 목표로 삼는 방향
+    wanderTimer: POLICE_WANDER_MIN_INTERVAL_SEC + Math.random() * (POLICE_WANDER_MAX_INTERVAL_SEC - POLICE_WANDER_MIN_INTERVAL_SEC),
+    route: null,          // 추격 중 도로를 따라가는 경로(웨이포인트 배열) - 없으면 직선 추격으로 대체
+    routeIndex: 0,        // 지금 향하고 있는 경로상의 웨이포인트 인덱스
+    routeRecalcTimer: 0,  // 경로를 다시 계산하기까지 남은 시간(초)
+    wasCollidingWithPlayer: false, // 직전 프레임에 플레이어와 물리적으로 맞닿아 있었는지(충돌 "순간"만 감지하기 위함)
+    collisionCooldownTimer: 0,     // 한 번 충돌한 뒤, 다시 충돌 판정이 가능해지기까지 남은 시간(초)
+    stunTimer: 0,                  // 충돌 직후 체포 판정(빨간 원)이 잠시 사라져 있는 남은 시간(초)
+    knockbackTimer: 0,             // 남은 넉백 시간(초) - 0보다 크면 충돌로 튕겨나가는 중이라 추격 로직이 전부 멈춤
+    knockbackHeading: 0,           // 넉백 중 강제로 이동하는 방향(도)
+    knockbackSpeed: 0,             // 넉백 시작 속도(m/s) - 시간이 지날수록 0으로 감쇠
+  });
+}
+
+// 경찰차 대수만큼, 플레이어 주변의 무작위 방향/거리에 스폰시킨다.
+function spawnPoliceCars() {
+  for (let i = 0; i < POLICE_COUNT; i++) {
+    createPoliceCar((360 / POLICE_COUNT) * i);
+  }
+}
+
+// 게임 시작 직후 지정된 시간(초) 동안 화면에 큰 숫자로 카운트다운을 보여주고,
+// 그 시간 동안은 경찰차를 스폰하지 않아 플레이어가 자유롭게 돌아다닐 수 있게 한다.
+// 카운트다운이 끝나면 그제서야 spawnPoliceCars()를 호출해 경찰차들을 등장시킨다.
+function startPoliceCountdown() {
+  const overlay = document.getElementById('countdown-overlay');
+  const numberEl = document.getElementById('countdown-number');
+  let remaining = POLICE_SPAWN_DELAY_SECONDS;
+
+  overlay.style.display = 'flex';
+  numberEl.textContent = remaining;
+
+  const intervalId = setInterval(() => {
+    if (isPaused) return; // 일시정지 중에는 카운트다운도 함께 멈춘다
+    remaining -= 1;
+    if (remaining <= 0) {
+      clearInterval(intervalId);
+      overlay.style.display = 'none';
+      spawnPoliceCars(); // 카운트다운 종료 → 경찰차가 어디선가 나타남
+      // [버그 수정] 재시작으로 웨이브가 유지된 경우, 지워졌던 웨이브별 누적 효과(트럭/스파이크/헬기 등)를
+      // 현재 웨이브에 맞게 함께 복원한다. (최초 게임 시작 시엔 currentWave가 1이라 아무 효과도 없음)
+      respawnWaveEnemies(currentWave, performance.now());
+    } else {
+      numberEl.textContent = remaining;
+    }
+  }, 1000);
+}
+
+// ---------- 4. 왼쪽 버튼: 전진 / 멈춤 / 후진 ----------
+const btnForward = document.getElementById('btn-forward');
+const btnStop = document.getElementById('btn-stop');
+const btnReverse = document.getElementById('btn-reverse');
+
+function setThrottle(mode) {
+  throttleMode = mode;
+  [btnForward, btnStop, btnReverse].forEach(b => b.classList.remove('active-state'));
+  if (mode === 'forward') btnForward.classList.add('active-state');
+  if (mode === 'stop') btnStop.classList.add('active-state');
+  if (mode === 'reverse') btnReverse.classList.add('active-state');
+}
+btnForward.addEventListener('pointerdown', () => setThrottle('forward'));
+btnStop.addEventListener('pointerdown', () => setThrottle('stop'));
+btnReverse.addEventListener('pointerdown', () => setThrottle('reverse'));
+setThrottle('forward'); // 시작하자마자 전진 상태이므로, 버튼 표시도 처음부터 "전진"이 활성화되어 보이도록 동기화
+
+// ---------- 4-0. 속도 표시 아래의 일시정지 버튼 ----------
+// 누를 때마다 일시정지 ↔ 재개를 토글한다. 일시정지 중에는 gameLoop와 자유주행 카운트다운이 모두 멈춘다.
+const pauseBtn = document.getElementById('pause-btn');
+pauseBtn.addEventListener('click', () => {
+  isPaused = !isPaused;
+  pauseBtn.textContent = isPaused ? '▶' : '⏸';
+  pauseBtn.setAttribute('aria-label', isPaused ? '재생' : '일시정지');
+  pauseBtn.classList.toggle('is-paused', isPaused);
+  if (!isPaused) {
+    // 재개 시, 멈춰있던 동안 흐른 실제 시간을 dt에 한꺼번에 반영해 차가 순간이동하듯 튀지 않도록 기준 시각을 갱신
+    lastTime = performance.now();
+  }
+});
+
+// ---------- 4-1. 전진 버튼 옆 +/- 버튼: 최고 전진 속도를 10km/h씩 조절 ----------
+const btnSpeedUp = document.getElementById('btn-speed-up');
+const btnSpeedDown = document.getElementById('btn-speed-down');
+const SPEED_STEP_MS = 10 / 3.6;      // 10km/h를 m/s로 환산
+const MIN_MAX_SPEED_MS = 10 / 3.6;   // 최고속도 하한: 10km/h
+const MAX_MAX_SPEED_MS = 190 / 3.6;  // 최고속도 상한: 190km/h
+
+function adjustMaxSpeed(deltaMs) {
+  car.maxForwardSpeed = Math.max(
+    MIN_MAX_SPEED_MS,
+    Math.min(MAX_MAX_SPEED_MS, car.maxForwardSpeed + deltaMs)
+  );
+  // 현재 속도가 새 최고속도보다 높다면 즉시 새 상한으로 맞춰줌
+  if (car.speed > car.maxForwardSpeed) car.speed = car.maxForwardSpeed;
+}
+btnSpeedUp.addEventListener('pointerdown', () => adjustMaxSpeed(SPEED_STEP_MS));
+btnSpeedDown.addEventListener('pointerdown', () => adjustMaxSpeed(-SPEED_STEP_MS));
+
+// 버튼을 누르고 있는 동안 자동으로 반복 실행되도록 하는 공용 롱프레스 헬퍼
+// (처음 한 번 즉시 실행 → REPEAT_DELAY_MS 뒤부터 → REPEAT_INTERVAL_MS 간격으로 계속 반복)
+function attachHoldRepeat(el, action) {
+  const REPEAT_DELAY_MS = 350;    // 누른 뒤 반복이 시작되기까지의 지연시간
+  const REPEAT_INTERVAL_MS = 100; // 반복 간격
+  let delayTimer = null;
+  let repeatTimer = null;
+
+  function stop() {
+    clearTimeout(delayTimer);
+    clearInterval(repeatTimer);
+    delayTimer = null;
+    repeatTimer = null;
+  }
+
+  el.addEventListener('pointerdown', () => {
+    stop();
+    action(); // 탭 한 번만 해도 즉시 1회 반영
+    delayTimer = setTimeout(() => {
+      repeatTimer = setInterval(action, REPEAT_INTERVAL_MS);
+    }, REPEAT_DELAY_MS);
+  });
+
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach((evt) => {
+    el.addEventListener(evt, stop);
+  });
+}
+attachHoldRepeat(btnSpeedUp, () => adjustMaxSpeed(SPEED_STEP_MS));
+attachHoldRepeat(btnSpeedDown, () => adjustMaxSpeed(-SPEED_STEP_MS));
+
+// ---------- 5. 우측 하단 원형 핸들: 중심 기준 각도를 그대로 자동차 방향에 매핑 ----------
+const wheelZone = document.getElementById('wheel-zone');
+const wheelNeedle = document.getElementById('wheel-needle');
+let wheelActive = false;
+const WHEEL_DEADZONE_PX = 10; // 중심에서 너무 가까우면 각도가 불안정하므로 무시
+
+function updateHeadingFromPointer(e) {
+  const rect = wheelZone.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const dx = e.clientX - cx;
+  const dy = e.clientY - cy;
+  const dist = Math.hypot(dx, dy);
+  if (dist < WHEEL_DEADZONE_PX) return;
+  // 중심점 기준 각도: 0=위쪽(북쪽/정면), 시계방향으로 증가 (자동차 heading 정의와 동일)
+  const angle = Math.atan2(dx, -dy) * 180 / Math.PI;
+  car.heading = (angle + 360) % 360;
+}
+
+wheelZone.addEventListener('pointerdown', (e) => {
+  wheelActive = true;
+  wheelZone.setPointerCapture(e.pointerId);
+  updateHeadingFromPointer(e);
+});
+wheelZone.addEventListener('pointermove', (e) => {
+  if (!wheelActive) return;
+  updateHeadingFromPointer(e);
+});
+function releaseWheel() { wheelActive = false; }
+wheelZone.addEventListener('pointerup', releaseWheel);
+wheelZone.addEventListener('pointercancel', releaseWheel);
+
+// ---------- 6. 메인 게임 루프 ----------
+const hud = document.getElementById('hud');
+const scoreHud = document.getElementById('score-hud');
+
+// ---------- 점수 시스템: 주인공 차가 "실제로 이동한 거리"만큼만 점수가 오른다 ----------
+// - 정차해 있으면(경찰 순찰을 피해 멈춰 있든, 그냥 멈춰 있든) 이동 거리가 0이므로 점수도 자연히 멈춘다.
+// - 거리를 그대로 점수로 주면 숫자가 너무 커지고 장거리 질주만으로 쉽게 고득점이 되므로,
+//   일정 거리(m)당 1점만 오르도록 변환 비율을 적당히 낮춰서 사용한다.
+let score = 0;                          // 내부적으로는 소수점까지 누적 (표시할 때만 정수로 반올림)
+const SCORE_METERS_PER_POINT = 15;      // 15m 이동할 때마다 1점 (숫자를 원하면 이 값만 조절하면 됨)
+const offroadWarning = document.getElementById('offroad-warning');
+// ---- 웨이브(난이도 단계) 관련 튜닝 값 ----
+const WAVE_SCORE_STEP = 200;            // 점수가 이만큼 오를 때마다 웨이브가 1씩 상승
+const waveHud = document.getElementById('wave-hud');
+let currentWave = 1;                    // 현재 웨이브 (1웨이브부터 시작)
+let policeWaveSpeedMultiplier = 1;      // 웨이브3부터 적용되는 경찰차 속도 배율
+let specialTrucks = [];                 // 웨이브4에서 등장하는 특수 트럭들(항상 TRUCK_COUNT대). 없으면 빈 배열
+let truckCatchingPlayer = false;        // 이번 프레임에 트럭(들) 중 하나라도 플레이어를 체포 범위 안에 두고 있는지
+let truckRespawnTimer = 0;              // 트럭이 돌파해서 사라진 뒤, 새 트럭이 다시 등장하기까지 남은 시간(초)
+let civilianBlocker = null;             // 웨이브6부터 등장하는 자유주행 "길막" 민간 차량(녹색). 없으면 null
+let spikeStrips = [];                   // 웨이브5에서 도로 곳곳에 뿌려지는 스파이크 스트립(타이어 파열 장치) 배열
+// ---- 경찰차(경찰과 도둑) 관련 튜닝 값 ----
+const POLICE_COUNT = 3;                 // 경찰차 대수
+const POLICE_STEER_RATE_DEG_PER_SEC = 200; // 경찰차가 방향을 트는 속도(도/초)
+const POLICE_SPAWN_MIN_DIST_M = 380;    // 최초 스폰 시 플레이어로부터 최소 거리(m) - 반드시 탐지 범위(300m)보다 커야 스폰 즉시 발각되지 않음
+const POLICE_SPAWN_MAX_DIST_M = 600;    // 최초 스폰 시 플레이어로부터 최대 거리(m)
+const CATCH_RADIUS_METERS = 25;         // 체포 판정 원의 반지름(m) - 눈에 보이는 원과 어긋나지 않도록 타이트하게
+const CATCH_HOLD_SECONDS = 5;           // 이 원 안에 이 시간(초)을 초과해서 머물면 체포
+const POLICE_SPEED_FACTOR = 0.7;        // 경찰차 최고 속도(추격 중) = 플레이어 최고 속도 × 이 값 (플레이어보다 느리게)
+
+// ---- 순찰(patrol) / 추격(chase) - "숨김과 들킴" 관련 튜닝 값 ----
+const POLICE_DETECTION_RADIUS_METERS = 300; // 순찰 중인 경찰차 주변의 "탐지 범위" 반지름(큰 초록 원) - 기존의 2배
+const POLICE_PATROL_SPEED_FACTOR = 0.35;    // 순찰 중 속도 = 플레이어 최고 속도 × 이 값 (추격 때보다 훨씬 느리게, 여유있게 관찰 가능)
+const POLICE_WANDER_MIN_INTERVAL_SEC = 3;   // 순찰 중 방향을 새로 바꾸기까지의 최소 시간(초)
+const POLICE_WANDER_MAX_INTERVAL_SEC = 7;   // 순찰 중 방향을 새로 바꾸기까지의 최대 시간(초)
+const POLICE_WANDER_TURN_RANGE_DEG = 70;    // 방향을 바꿀 때, 기존 방향 기준 좌우로 얼마나까지 틀 수 있는지
+const POLICE_PATROL_MAX_DIST_M = 420;       // 순찰차가 플레이어에게서 이만큼(m) 넘게 계속 멀어지면, 근처로 다시 재배치
+const DETECTED_WARNING_DURATION_MS = 1800;  // "발각됨!" 배너가 보이는 시간
+
+// ---- 경찰 "무전 네트워크" 재배치 관련 튜닝 값 ----
+// 어떤 경찰차가 플레이어를 이만큼(m) 이상 놓친 채로 일정 시간 이상 지속되면,
+// "무전을 받은 다른 경찰차"가 플레이어 진행 방향 앞쪽에 새로 나타나는 것처럼 그 경찰차를 재배치한다.
+const POLICE_GIVEUP_DISTANCE_M = 220;
+const POLICE_GIVEUP_HOLD_SECONDS = 4;
+const POLICE_RESPAWN_AHEAD_MIN_M = 350; // 재배치 시, 플레이어 진행 방향 기준 최소 거리 - 반드시 탐지 범위(300m)보다 커야 재배치 즉시 재발각되지 않음
+const POLICE_RESPAWN_AHEAD_MAX_M = 550; // 재배치 시, 플레이어 진행 방향 기준 최대 거리
+const POLICE_RESPAWN_ANGLE_SPREAD_DEG = 40; // 정확히 정면이 아니라 좌우로 약간 퍼지도록 하는 각도 범위
+const POLICE_SPAWN_DELAY_SECONDS = 15;  // 게임 시작 후 이 시간(초) 동안은 경찰차 없이 자유 주행
+
+// ---- 추격 중 "도로를 따라 둘러가는" 길찾기(경로탐색) 관련 튜닝 값 ----
+// 기존에는 추격 중인 경찰차가 플레이어를 향해 무조건 직선(베어링)으로만 조향했기 때문에,
+// 플레이어가 건물 반대편에 있으면 경찰차가 건물 벽에 막혀 그 자리서 헤매는 문제가 있었다.
+// 이를 해결하기 위해, 화면에 보이는 도로 벡터선들을 노드/간선 그래프로 만들고
+// 다익스트라 최단경로로 "실제로 도로를 따라 둘러서" 플레이어에게 접근하도록 한다.
+const POLICE_ROUTE_RECALC_INTERVAL_SEC = 1.5; // 경로를 이 주기(초)마다 새로 계산 (플레이어가 계속 움직이므로)
+const POLICE_ROUTE_WAYPOINT_ARRIVE_M = 12;    // 경로상의 한 지점에 이만큼(m) 가까워지면 다음 지점으로 넘어감
+const POLICE_ROUTE_START_SNAP_MAX_M = 60;     // 경찰차의 실제 위치가 도로 그래프의 가장 가까운 노드로부터 이보다 멀면
+                                               // "이 근처엔 (화면에 렌더링된) 도로 데이터가 없다"고 보고 길찾기를 건너뛴다.
+                                               // (화면 밖 먼 곳에 스폰된 차가 화면 안의 엉뚱한 노드로 잘못 스냅되어
+                                               //  방향을 못 잡고 서투르게 겉도는 문제를 막기 위함 - 이 경우 아래에서
+                                               //  직선 추격으로 자동 대체되고, 화면에 들어와 실제 도로가 잡히면 정상 복귀됨)
+const ROAD_GRAPH_NODE_SNAP_DEG = 0.00004;     // 그래프 노드 병합 격자 크기(약 4m) - 타일 경계에서 살짝 어긋난 교차점을 하나로 합침
+const ROAD_GRAPH_MAX_NODES = 4000;            // 노드가 이 개수를 넘으면(아주 넓은 화면 등) 성능을 위해 길찾기를 건너뛰고 직선 추격으로 대체
+const POLICE_DIRECT_CHASE_RANGE_M = 40;       // 플레이어와 이 거리(m) 이내로 가까워지면, 복잡한 길찾기 대신 플레이어를 향해 곧장 조향
+                                               // (주차장/골목처럼 노드가 촘촘한 구간에서 매번 경로가 재계산되며
+                                               //  서로 다른 노드로 튀어서 "제자리를 빙빙 도는" 문제를 막기 위함)
+
+// ---- 경찰차 vs 플레이어 "몸통 박치기(직접 충돌)" 관련 튜닝 값 ----
+// 큰 직선 도로에서는 경찰차가 플레이어보다 항상 느리므로(POLICE_SPEED_FACTOR<1) 거리를 영원히 좁히지 못해
+// 체포 범위(25m) 안으로 못 들어오는 문제가 있었다. 이를 보완하기 위해, 두 차량이 실제로 맞닿을 만큼
+// 아주 가까워지면(체포 판정보다 훨씬 타이트한 거리) "충돌"로 보고 서로 강하게 튕겨나가게 한다.
+//
+// 예전 방식(고정 10m)은 화면 확대 수준(zoom)에 따라 실제 아이콘 크기가 달라지는 것을 반영하지 못해서,
+// 확대된 화면에서는 아이콘끼리 눈으로 보기엔 완전히 겹쳤는데도 실제 거리는 10m가 넘어 충돌 판정이
+// 전혀 나지 않는 문제가 있었다(= "그냥 통과해버리는" 느낌). 이를 고치기 위해 화면 픽셀 크기 기준으로
+// 매 프레임 판정 거리를 다시 계산한다 → 아이콘이 화면에서 실제로 맞닿는 순간 = 충돌 판정이 나는 순간.
+const CAR_ICON_HIT_RADIUS_PX = 9;                // 차량 아이콘 1대의 "충돌 반경"(화면 CSS 픽셀, 아이콘 실제 크기 14x24px 기준). 두 차가 이 합(18px)만큼 가까워지면 충돌.
+const POLICE_COLLISION_HIT_COOLDOWN_SEC = 5;     // 한 번 충돌한 뒤, 5초 동안은 다시 충돌 판정을 내지 않고 서로 그냥 통과시킨다.
+                                                  // (쿨타임이 너무 짧으면 좁은 골목 등에서 서로 위치가 안 풀려 계속 부딪히며
+                                                  //  영원히 지나가지 못하는 경우가 생길 수 있어, 확실히 헤어질 시간을 준다)
+const POLICE_COLLISION_STUN_SECONDS = 5;         // 충돌 직후, 체포 판정(빨간 원)이 잠시 사라져 있는 시간(초) - 이 동안은 체포 카운트도 멈춤
+
+// 넉백(튕겨나감) 연출: 충돌 "순간" 두 차량 모두 속도를 0으로 강제 정지시킨 뒤,
+// 서로 반대쪽 대각선 "뒤" 방향으로 짧고 굵게 밀려났다가(정해진 시간 동안 조향/가속 입력 무시),
+// 넉백이 끝나면 그제서야 다시 속도 0에서부터 정상적으로 출발한다.
+const KNOCKBACK_ANGLE_DEG = 35;                  // 진행 방향의 정반대(180도)에서 좌/우로 벌어지는 대각선 각도
+const KNOCKBACK_DURATION_SEC = 0.45;             // 넉백이 지속되는 시간(초) - 이 동안 강제로 뒤로 밀려남
+const KNOCKBACK_SPEED_MS = 11;                   // 넉백 시작 속도(m/s, 약 40km/h) - 시간이 지날수록 0으로 감쇠(이즈아웃)
+const KNOCKBACK_SEPARATION_M = 4;                // 충돌 "순간" 겹침을 풀기 위해 즉시 벌려놓는 최소 거리(m)
+
+// 경찰차와 충돌한 직후, 플레이어는 평소보다 훨씬 빠른 가속도로 재가속한다(경찰차보다 훨씬 빨리 회복 →
+// 고의로 들이받아도 속도 면에서 이득을 보기 어렵게, 오히려 "다시 도망칠 기회"로만 쓰이게 하기 위함).
+// 경찰차/헬기는 계속 기존 car.accel(8)을 그대로 쓴다.
+const PLAYER_POST_COLLISION_ACCEL = 30;          // 부스트 중 가속도(m/s^2) - 기존 8보다 훨씬 큼
+const PLAYER_POST_COLLISION_ACCEL_SECONDS = 4;   // 위 부스트 가속도가 유지되는 시간(초)
+
+// ---- 웨이브4: 특수 트럭(직사각형 장애물 차량) 관련 튜닝 값 ----
+const TRUCK_COUNT = 2;                  // 트럭은 항상 정확히 2대 등장
+const TRUCK_LENGTH_M = 16;              // 트럭의 진행방향 길이(m) - 충돌 판정용 실제 크기
+const TRUCK_WIDTH_M = 7;                // 트럭의 폭(m) - 충돌 판정용 실제 크기
+const TRUCK_SPEED_FACTOR = 1.4;         // 트럭 최고 속도 = 플레이어 최고 속도 × 이 값 (플레이어보다 훨씬 빨라서, 전력 질주해도 결국 따라잡힌다)
+const TRUCK_STEER_RATE_DEG_PER_SEC = 170; // 트럭이 방향을 트는 속도(도/초) - 덩치 때문에 경찰차(200)보다 약간 둔하지만 여전히 매섭게 쫓아온다
+const TRUCK_HIT_COOLDOWN_SEC = 1.4;     // 한 번 충돌한 뒤, 다시 충돌 판정이 가능해지기까지의 최소 시간(초)
+const TRUCK_KNOCKBACK_SPEED_MS = 26;    // 트럭 충돌 시 플레이어가 튕겨나가는 속도(m/s, 약 94km/h) - "크게 많이" 튕겨나가도록 대폭 강화
+const TRUCK_KNOCKBACK_DURATION_SEC = 0.9; // 트럭 충돌 넉백 지속 시간(초) - 길게 끌어서 훨씬 멀리 밀려나는 느낌을 줌 (끝나는 순간 속도는 정확히 0)
+const TRUCK_CATCH_RADIUS_METERS = 25;   // 트럭 주변 체포 판정(빨간 원)의 반지름(m) - 경찰차와 동일
+const TRUCK_CATCH_HOLD_SECONDS = 5;     // 이 원 안에 이 시간(초)을 초과해서 머물면 체포 - 경찰차와 동일
+// [돌파형 트럭] 한 번 들이받고 나면 더 이상 맴돌지 않고, 그 방향 그대로 계속 직진해서 화면 밖으로 빠져나간다.
+const TRUCK_HIT_SPEED_DAMAGE_KMH = 100; // 충돌 순간 플레이어 속도(km/h)에서 이만큼을 깎는다(0 밑으로는 안 내려감)
+const TRUCK_BREAKTHROUGH_DESPAWN_DIST_M = 400; // 돌파 상태로 전환된 트럭이 플레이어로부터 이만큼(m) 멀어지면 화면 밖으로 나간 것으로 보고 제거
+const TRUCK_RESPAWN_DELAY_SEC = 4;      // 트럭이 돌파해서 사라진 뒤, 새 트럭이 다시 돌진해오기까지 걸리는 시간(초)
+
+// ===== 웨이브6+: 자유롭게 돌아다니는 "길막" 민간 차량(녹색) =====
+const CIVILIAN_SPEED_FACTOR = 0.55;            // 민간차 최고 속도 = 플레이어 최고 속도 × 이 값 (평범한 교통 흐름 정도)
+const CIVILIAN_SPAWN_MIN_DIST_M = 40;          // "길막"답게, 플레이어 아주 가까이에서 등장하는 최소 거리(m)
+const CIVILIAN_SPAWN_MAX_DIST_M = 90;          // 플레이어 근처에서 등장하는 최대 거리(m)
+const CIVILIAN_RESPAWN_DIST_M = 350;           // 플레이어와 이 거리(m) 이상 멀어지면, 계속 "길막" 역할을 하도록 플레이어 근처로 재배치
+const CIVILIAN_ROUTE_RECALC_INTERVAL_SEC = 5;  // 새로운 무작위 목적지를 이 주기(초)마다 다시 정함
+const CIVILIAN_ROUTE_WAYPOINT_ARRIVE_M = 10;   // 경로상의 한 지점에 이만큼(m) 가까워지면 다음 지점으로 넘어감
+const CIVILIAN_ROUTE_START_SNAP_MAX_M = 60;    // 도로 그래프 노드까지 거리가 이보다 멀면 경로 계산 포기(안전장치)
+
+// ---- 웨이브5: 스파이크 스트립(타이어 파열 장치) 관련 튜닝 값 ----
+const SPIKE_STRIP_COUNT = 6;                  // 도로 곳곳에 뿌려두는 스파이크 스트립 개수
+const SPIKE_STRIP_MIN_DIST_M = 120;           // 플레이어로부터 최소 이 거리(m)에 배치
+const SPIKE_STRIP_MAX_DIST_M = 420;           // 플레이어로부터 최대 이 거리(m)에 배치
+const SPIKE_STRIP_TRIGGER_RADIUS_M = 4;       // 이 거리(m) 이내로 지나가면 밟은 것으로 판정
+const SPIKE_STRIP_SPEED_DROP_MS = 40 / 3.6;   // 밟았을 때 순간적으로 깎이는 속도(-40km/h, m/s로 환산)
+const SPIKE_STRIP_HIT_COOLDOWN_SEC = 1.5;     // 한 번 밟은 뒤, 같은 자리에서 다시 판정되기까지의 최소 시간(초)
+const SPIKE_STRIP_MAX_DIST_FROM_PLAYER_M = 650; // 이 거리(m) 넘게 플레이어에게서 멀어지면 근처 도로로 재배치
+
+// ---- 웨이브6: 경찰 헬기 관련 튜닝 값 ----
+// 헬기는 자동차와 달리 "도로 위"라는 개념이 없다 - 하늘에서 접근하므로 건물/도로에 막히지 않고
+// 항상 플레이어를 향한 최단 직선 방향으로 곧장 날아온다. 그 대신 최고 속도는 반드시 플레이어의
+// 최고 속도보다 낮게 고정해서(웨이브3+의 policeWaveSpeedMultiplier도 적용하지 않음),
+// 잘 도망다니면(=계속 최고 속도를 유지하면) 결국 따돌릴 수 있게 한다.
+const HELICOPTER_SPEED_FACTOR = 0.72;          // 헬기 최고 속도 = 플레이어 최고 속도 × 이 값 (반드시 1 미만 - 플레이어보다 느리게. 기존 0.92는 너무 빨라서 하향)
+const HELICOPTER_STEER_RATE_DEG_PER_SEC = 150; // 헬기가 방향을 트는 속도(도/초)
+const HELICOPTER_CATCH_RADIUS_METERS = 30;     // 헬기의 체포 판정 원 반지름(m)
+const HELICOPTER_CATCH_HOLD_SECONDS = 8;       // 헬기에게 포위됐을 때 체포까지 걸리는 시간(초) - 경찰차(5초)보다 길게, 헬기가 너무 쉽게 잡지 않도록
+const HELICOPTER_SPAWN_MIN_DIST_M = 220;       // 최초 등장 시 플레이어로부터 최소 거리(m) - 화면 안에 곧 들어올 만한 거리로 축소
+const HELICOPTER_SPAWN_MAX_DIST_M = 380;       // 최초 등장 시 플레이어로부터 최대 거리(m)
+
+let policeCars = [];       // { lat, lng, heading, speed, el, circleEl, farTimer }
+let policeHelicopter = null; // 웨이브6에서 등장하는 경찰 헬기 { lat, lng, heading, speed, el, circleEl } - 없으면 null
+let caughtTimer = 0;       // 플레이어가 "체포 원" 안에 연속으로 머문 시간(초)
+let policeCarsCatchingPlayer = false; // 이번 프레임에 경찰차(순찰차 포함)가 플레이어를 체포 범위 안에 두고 있는지
+let helicopterCatchingPlayer = false; // 이번 프레임에 헬기가 플레이어를 체포 범위 안에 두고 있는지
+let catchSourcePos = null; // 체포 경고 문구를 그 위에 띄울 대상(경찰차 또는 헬기)의 { lat, lng, radiusMeters }
+let isCaught = false;      // 체포되어 게임이 멈춘 상태인지
+let isPaused = false;      // 일시정지 버튼으로 게임을 잠시 멈춘 상태인지
+
+// "처음 위치로 돌아가기" 버튼용: 게임이 맨 처음 시작된 위치/방향(도로 스냅 이후 값)
+let initialLat = null;
+let initialLng = null;
+let initialHeading = 0;
+
+let detectedWarningHideAt = 0; // "발각됨!" 배너를 몇 시각(ms)까지 보여줄지
+
+let lastTime = performance.now();
+let offroadWarningHideAt = 0;
+
+// ---- 도로 이탈 패널티 상태 머신 ----
+// 'none'    : 패널티 없음, 평소처럼 스로틀에 따라 가속/감속
+// 'dropping': 이탈 직후, 목표 속도까지 "빠르게" 감속하는 중
+// 'holding' : 감속 완료 후, 일정 시간 동안 가속을 막고 대기하는 중
+let offroadPenaltyState = 'none';
+let offroadPenaltyTimer = 0;          // 현재 상태(dropping/holding)에 머문 시간(초)
+let offroadPenaltyStartSpeed = 0;     // dropping 시작 시점의 속도(m/s)
+let offroadPenaltyTargetSpeed = 0;    // dropping이 도달해야 할 목표 속도(m/s)
+let wasOffRoad = false;               // 직전 프레임에 도로를 이탈해 있었는지 (이탈 "순간"을 감지하기 위함)
+
+// 도로 중심선에서 이 거리(미터)까지는 "도로 위"로 인정한다.
+// 확대 수준(zoom≈17.8)에서 실제로 화면에 그려지는 도로 선의 절반 두께(약 4m)에 맞춰뒀다.
+// 이보다 크게 하면 검은 도로선을 벗어난 뒤에도 한참 더 가야 보정이 시작된다.
+const ROAD_HALF_WIDTH_METERS = 5;
+
+// 도로에서 이만큼(m) 넘게 벗어나면, 방향 보정만 시킬 뿐 그 방향으로는 아예 "전진 자체"를 막아버린다.
+// (강이나 건물 단지를 그냥 뚫고 지나가는 꼼수를 막기 위함 - 보이지 않는 벽에 막힌 것처럼 동작)
+const OFFROAD_HARD_BLOCK_METERS = 25;
+// 이 범위(m) 안에서도 도로를 하나도 못 찾으면(지도 데이터 자체가 없는 아주 외딴 지역 등),
+// 예외적으로 막지 않고 통과시킨다 - 게임이 진행 불가 상태로 멈춰버리는 것을 방지하기 위한 안전장치.
+const OFFROAD_DETECT_RANGE_METERS = 400;
+
+// ---- 도로 이탈 시 자동 보정(부드러운 복귀) 관련 튜닝 값 ----
+// 이탈 상태일 때, 초당 최대 몇 도(度)까지 자동으로 방향을 도로 쪽으로 틀어줄지
+const OFFROAD_STEER_RATE_DEG_PER_SEC = 260;
+
+// ---- 도로 이탈 "패널티" 관련 튜닝 값 ----
+// 도로를 벗어난 순간, 현재 속도에서 이만큼(km/h)을 깎는다 → m/s로 환산해서 사용
+const OFFROAD_PENALTY_DROP_MS = 10 / 3.6;
+// 위 감속량을 몇 초에 걸쳐 "빠르게" 떨어뜨릴지 (속도 눈금계가 훅 줄어드는 연출용 시간)
+const OFFROAD_PENALTY_DROP_DURATION = 0.25;
+// (감속 후 대기 없이, 감속이 끝나자마자 곧바로 다시 가속이 가능해진다)
+
+// 주어진 위경도 근처에서 가장 가까운 도로(강조 레이어) 위의 지점과 그 거리를 계산한다.
+// - 주변에 도로 데이터 자체가 없으면(로딩 전 등) null 반환 → 호출 쪽에서 통과시켜 게임이 멈추지 않게 함
+// - turf.js 미로딩 시에도 null 반환(안전장치)
+function getNearestRoadInfo(lat, lng, boxHalfPx = 90) {
+  if (typeof turf === 'undefined') return null;
+  let screenPt;
+  try {
+    screenPt = map.project([lng, lat]);
+  } catch (e) {
+    return null;
+  }
+  const searchBox = [
+    [screenPt.x - boxHalfPx, screenPt.y - boxHalfPx],
+    [screenPt.x + boxHalfPx, screenPt.y + boxHalfPx]
+  ];
+  let feats;
+  try {
+    feats = map.queryRenderedFeatures(searchBox, { layers: ['drivable-road-highlight'] });
+  } catch (e) {
+    return null;
+  }
+  if (!feats || feats.length === 0) return null; // 주변에 도로 정보 자체가 없으면 판단 보류
+
+  const turfPoint = turf.point([lng, lat]);
+  let best = null;
+  let bestDist = Infinity;
+  for (const f of feats) {
+    try {
+      const snapped = turf.nearestPointOnLine(f, turfPoint, { units: 'meters' });
+      if (snapped.properties.dist < bestDist) {
+        bestDist = snapped.properties.dist;
+        best = snapped.geometry.coordinates; // [lng, lat]
+      }
+    } catch (e) { /* 도형 형식이 안 맞으면 건너뜀 */ }
+  }
+  if (!best) return null;
+  return { dist: bestDist, lng: best[0], lat: best[1] };
+}
+
+// getNearestRoadInfo를 여러 검색 반경(픽셀)으로 순차 재시도하면서,
+// 실제로 "maxAcceptDistM" 이내에 있는 진짜 도로 지점을 찾는다.
+// (화면 좁은 박스 안에 도로 렌더링 자체가 없어서 null이 나오는 경우를 보완)
+function findRoadPointNear(lat, lng, maxAcceptDistM = 40) {
+  for (const boxHalfPx of [90, 180, 320]) {
+    const info = getNearestRoadInfo(lat, lng, boxHalfPx);
+    if (info && info.dist <= maxAcceptDistM) return info;
+  }
+  return null;
+}
+
+// ============================================================
+//  경찰차 길찾기: 화면에 렌더링된 도로선을 그래프로 만들고 최단경로를 구한다
+// ============================================================
+
+// 현재 화면(뷰포트)에 그려진 모든 도로 벡터선을 모아 "노드(교차점/꼭짓점) + 간선(도로 구간)" 그래프로 만든다.
+// - 서로 다른 벡터 타일 경계에서 좌표가 미세하게 어긋나는 경우를 대비해, 작은 격자(SNAP)로 좌표를 반올림해
+//   충분히 가까운 점들을 같은 노드로 합친다.
+// - 도로 데이터가 아예 없으면(로딩 전 등) null을 반환한다.
+function buildRoadGraph() {
+  let feats;
+  try {
+    feats = map.queryRenderedFeatures({ layers: ['drivable-road-highlight'] });
+  } catch (e) {
+    return null;
+  }
+  if (!feats || feats.length === 0) return null;
+
+  const nodeCoord = new Map(); // key -> [lng, lat] (해당 격자의 대표 좌표)
+  const adj = new Map();       // key -> [{ to: key, dist: meters }, ...]
+
+  function keyOf(lng, lat) {
+    return Math.round(lat / ROAD_GRAPH_NODE_SNAP_DEG) + '_' + Math.round(lng / ROAD_GRAPH_NODE_SNAP_DEG);
+  }
+  function ensureNode(lng, lat) {
+    const k = keyOf(lng, lat);
+    if (!nodeCoord.has(k)) {
+      nodeCoord.set(k, [lng, lat]);
+      adj.set(k, []);
+    }
+    return k;
+  }
+  function addEdge(k1, k2, dist) {
+    if (k1 === k2 || dist <= 0) return;
+    adj.get(k1).push({ to: k2, dist });
+    adj.get(k2).push({ to: k1, dist });
+  }
+
+  for (const f of feats) {
+    const geom = f.geometry;
+    if (!geom) continue;
+    const lines = geom.type === 'LineString' ? [geom.coordinates]
+                : geom.type === 'MultiLineString' ? geom.coordinates
+                : null;
+    if (!lines) continue;
+
+    for (const coords of lines) {
+      let prevKey = null, prevCoord = null;
+      for (const c of coords) {
+        const k = ensureNode(c[0], c[1]);
+        if (prevKey !== null) {
+          const dist = turf.distance(turf.point(prevCoord), turf.point(c), { units: 'meters' });
+          addEdge(prevKey, k, dist);
+        }
+        prevKey = k;
+        prevCoord = c;
+      }
+    }
+    if (nodeCoord.size > ROAD_GRAPH_MAX_NODES) return null; // 너무 커지면 성능 보호를 위해 포기(호출 쪽에서 직선 추격으로 대체)
+  }
+
+  if (nodeCoord.size === 0) return null;
+  return { nodeCoord, adj };
+}
+
+// 그래프에서 주어진 위경도와 가장 가까운 노드를 찾는다(경로의 시작/끝 지점을 그래프에 "붙이기" 위함).
+// maxDistM을 지정하면, 가장 가까운 노드조차 그보다 멀리 떨어져 있을 경우 null을 반환한다.
+// → buildRoadGraph()가 "현재 화면에 렌더링된 도로"만 대상으로 하기 때문에, 화면 밖 먼 곳(예: 방금
+//   스폰된 경찰차)의 실제 위치 근처에는 그래프에 도로 데이터가 아예 없을 수 있다. 이때 그냥 화면 안의
+//   아무 노드나 "가장 가까운 노드"로 잘못 잡으면, 실제로는 연결되지도 않은 엉뚱한 경로를 따라가며
+//   방향을 못 잡고 겉도는(순찰하듯 서투르게 도는) 문제가 생긴다.
+function nearestGraphNode(graph, lng, lat, maxDistM) {
+  let bestKey = null, bestDist = Infinity;
+  const target = turf.point([lng, lat]);
+  for (const [k, coord] of graph.nodeCoord) {
+    const d = turf.distance(turf.point(coord), target, { units: 'meters' });
+    if (d < bestDist) { bestDist = d; bestKey = k; }
+  }
+  if (bestKey === null) return null;
+  if (maxDistM !== undefined && bestDist > maxDistM) return null; // 이 근처엔 그래프에 잡힌 도로 데이터가 없다는 뜻 → 호출 쪽에서 직선 추격으로 대체
+  return { key: bestKey, dist: bestDist };
+}
+
+// 다익스트라 최단경로: startLng/Lat에서 endLng/Lat까지, 그래프(도로망)를 따라가는 웨이포인트 배열을 반환한다.
+// - 노드 수가 많지 않다는 전제(게임 화면 하나 분량의 도로만 대상) 하에, 우선순위 큐 없이 단순 선형 탐색으로 구현.
+// - 경로를 못 찾으면(그래프가 끊어져 있는 등) null을 반환 → 호출 쪽에서 기존 직선 추격으로 대체(안전장치).
+// - startMaxSnapM: 시작 지점(주로 경찰차의 실제 위치)이 그래프 상 가장 가까운 노드로부터 이보다 멀면
+//   "이 근처엔 도로 데이터가 없다"고 보고 바로 null을 반환한다(먼 곳에 스폰된 차가 화면 안의 엉뚱한
+//   노드로 잘못 스냅되어 이상한 경로를 따라가는 것을 막기 위함).
+function findRoutePath(graph, startLng, startLat, endLng, endLat, startMaxSnapM) {
+  const startNode = nearestGraphNode(graph, startLng, startLat, startMaxSnapM);
+  const endNode = nearestGraphNode(graph, endLng, endLat);
+  if (!startNode || !endNode) return null;
+
+  const dist = new Map([[startNode.key, 0]]);
+  const prev = new Map();
+  const visited = new Set();
+
+  while (true) {
+    let u = null, uDist = Infinity;
+    for (const [k, d] of dist) {
+      if (!visited.has(k) && d < uDist) { uDist = d; u = k; }
+    }
+    if (u === null || u === endNode.key) break;
+    visited.add(u);
+
+    for (const edge of (graph.adj.get(u) || [])) {
+      if (visited.has(edge.to)) continue;
+      const nd = uDist + edge.dist;
+      if (nd < (dist.has(edge.to) ? dist.get(edge.to) : Infinity)) {
+        dist.set(edge.to, nd);
+        prev.set(edge.to, u);
+      }
+    }
+  }
+
+  if (!dist.has(endNode.key)) return null; // 도로망 상으로 도달할 수 없음(그래프가 끊어짐 등)
+
+  const pathKeys = [endNode.key];
+  let cur = endNode.key;
+  while (cur !== startNode.key) {
+    cur = prev.get(cur);
+    if (cur === undefined) return null; // 역추적 실패(이론상 발생하지 않아야 하지만 안전장치)
+    pathKeys.push(cur);
+  }
+  pathKeys.reverse();
+
+  const waypoints = pathKeys.map((k) => graph.nodeCoord.get(k));
+  // 마지막 노드에서 멈추지 말고, 실제 플레이어 좌표까지 한 걸음 더 접근하도록 목표점을 추가
+  waypoints.push([endLng, endLat]);
+  return waypoints;
+}
+
+// 실제 반경(미터)이 지금 화면에서 몇 픽셀에 해당하는지, "근사 공식"이 아니라
+// 아이콘을 그릴 때 쓰는 것과 동일한 map.project() 좌표 변환으로 정확히 구한다.
+// (예전에는 "156543.03392*cos(lat)/2^zoom" 같은 고정 타일 크기 가정 공식을 썼는데,
+//  지도 라이브러리가 실제로 쓰는 타일 크기 기준과 어긋나서 원이 실제보다 작게 그려지는
+//  오차가 있었다 → 화면상 초록/빨간 원 밖에 있는데도 발각/체포되는 것처럼 보이는 원인이었음.
+//  이 함수는 중심점과 그로부터 실제 반경만큼 떨어진 지점을 둘 다 화면에 투영해서 그 픽셀
+//  거리를 재기 때문에, 지도가 어떻게 그려지든 항상 화면과 100% 일치한다.)
+function metersToScreenPixels(lat, lng, meters) {
+  const centerPt = map.project([lng, lat]);
+  const edgePoint = turf.destination(turf.point([lng, lat]), meters / 1000, 0, { units: 'kilometers' });
+  const edgePt = map.project(edgePoint.geometry.coordinates);
+  return Math.hypot(centerPt.x - edgePt.x, centerPt.y - edgePt.y);
+}
+
+function gameLoop(now) {
+  const dt = Math.min(0.05, (now - lastTime) / 1000); // 초 단위, 급격한 프레임 드랍 방지
+  lastTime = now;
+
+  // 이미 체포된 상태이거나 일시정지 중이라면 모든 갱신을 멈추고 화면만 유지한다
+  if (isCaught || isPaused) {
+    requestAnimationFrame(gameLoop);
+    return;
+  }
+
+  // 점수 계산용: 이번 프레임이 시작될 때의 위치를 기억해 둔다(프레임 끝의 실제 위치와 비교해 이동 거리를 구함)
+  const scoreStartLat = car.lat;
+  const scoreStartLng = car.lng;
+
+  // 넉백(충돌로 튕겨나가는 중)인지 여부. 넉백 중에는 스로틀/조향/도로이탈 로직을 전부 무시하고,
+  // 정해진 대각선 방향으로 강제로 밀려나며 속도가 점점 0으로 줄어든다. 넉백이 끝나는 순간 speed=0이
+  // 되므로, 그 다음 프레임부터는 평소 로직에 따라 다시 처음부터 가속해서 출발하게 된다.
+  const inKnockback = car.knockbackTimer > 0;
+
+  // --- 속도 갱신 ---
+  if (inKnockback) {
+    car.knockbackTimer = Math.max(0, car.knockbackTimer - dt);
+    const kt = car.knockbackTimer / car.knockbackDuration; // 1 → 0으로 이즈아웃 (충돌 종류별 실제 지속시간 기준)
+    // 보통은 knockbackEndSpeed가 0이라 완전 정지까지 이즈아웃되지만, 트럭 충돌처럼 "속도를 일정량만 깎는"
+    // 피해의 경우 knockbackEndSpeed가 0이 아니므로 그 속도까지만 이즈아웃된다.
+    car.speed = car.knockbackEndSpeed + (car.knockbackSpeed - car.knockbackEndSpeed) * kt;
+    car.heading = car.knockbackHeading;
+    if (car.knockbackTimer <= 0) {
+      car.speed = car.knockbackEndSpeed; // 넉백 종료 → 지정된 속도(보통 0)로 정착한 뒤 다시 출발
+      setThrottle('forward'); // 유저가 다시 누르지 않아도 자동으로 전진 버튼이 눌린 상태로 전환
+    }
+  } else if (offroadPenaltyState === 'dropping') {
+    // 이탈 직후: 목표 속도(-10km/h)까지 짧은 시간 동안 빠르게 감속 (눈금계가 훅 줄어드는 연출)
+    offroadPenaltyTimer += dt;
+    const t = Math.min(1, offroadPenaltyTimer / OFFROAD_PENALTY_DROP_DURATION);
+    car.speed = offroadPenaltyStartSpeed + (offroadPenaltyTargetSpeed - offroadPenaltyStartSpeed) * t;
+    if (t >= 1) {
+      car.speed = offroadPenaltyTargetSpeed;
+      offroadPenaltyState = 'none'; // 대기 없이 곧바로 평소 가속 로직으로 복귀
+      offroadPenaltyTimer = 0;
+    }
+  } else {
+    // 패널티가 없는 평소 상태: 기존과 동일한 스로틀 기반 가속/감속
+    const target = throttleMode === 'forward' ? car.maxForwardSpeed
+                 : throttleMode === 'reverse' ? -car.maxReverseSpeed
+                 : 0;
+    const decel = throttleMode === 'stop' ? car.brakeDecel : car.accel;
+
+    // 경찰차 충돌 직후 남은 부스트 시간이 있다면, 그 동안만 훨씬 큰 가속도로 재가속한다.
+    if (car.collisionAccelBoostTimer > 0) {
+      car.collisionAccelBoostTimer = Math.max(0, car.collisionAccelBoostTimer - dt);
+    }
+    const accelToUse = car.collisionAccelBoostTimer > 0 ? PLAYER_POST_COLLISION_ACCEL : car.accel;
+
+    if (car.speed < target) {
+      car.speed = Math.min(target, car.speed + accelToUse * dt);
+    } else if (car.speed > target) {
+      car.speed = Math.max(target, car.speed - decel * dt);
+    }
+  }
+
+
+  // --- 방향(heading)은 이제 오른쪽 조향 영역의 pointermove 이벤트에서 직접 갱신됨 ---
+  // (손가락 이동량 = 자동차 머리 회전각, 1:1 직접 매핑 방식이라 여기서 별도 계산 불필요)
+
+  // --- 위치(위경도) 후보값 계산 (아직 확정하지 않음) ---
+  const headingRad = car.heading * Math.PI / 180;
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos(car.lat * Math.PI / 180);
+  const dNorth = car.speed * dt * Math.cos(headingRad);
+  const dEast  = car.speed * dt * Math.sin(headingRad);
+  const candidateLat = car.lat + dNorth / metersPerDegLat;
+  const candidateLng = car.lng + dEast / metersPerDegLng;
+
+  // --- 도로 위인지 확인하고, 이동을 확정한다 ---
+  // 도로 위: 그대로 이동. 살짝 이탈: 이탈 "순간"에 -10km/h 급감속 패널티를 한 번 트리거하고
+  // 도로 쪽으로 방향을 틀며 계속 진행(자동 복귀). 많이 이탈(OFFROAD_HARD_BLOCK_METERS 초과):
+  // 방향만 도로 쪽으로 틀 뿐, 그 방향으로는 "전진 자체"가 막혀서 강이나 건물 단지를 뚫고 갈 수 없다.
+  if (Math.abs(car.speed) > 0.001) {
+    const roadInfo = findRoadPointNear(candidateLat, candidateLng, OFFROAD_DETECT_RANGE_METERS);
+    const onRoad = !roadInfo || roadInfo.dist <= ROAD_HALF_WIDTH_METERS;
+    const hardBlocked = roadInfo && roadInfo.dist > OFFROAD_HARD_BLOCK_METERS;
+
+    if (onRoad) {
+      car.lat = candidateLat;
+      car.lng = candidateLng;
+      offroadWarning.style.display = 'none';
+      wasOffRoad = false; // 다시 도로 위로 복귀 → 다음 이탈 때 패널티가 새로 트리거되도록 초기화
+    } else {
+      offroadWarning.style.display = 'block';
+      offroadWarning.textContent = hardBlocked ? '도로 이탈! (진행 불가)' : '도로 이탈!';
+      offroadWarningHideAt = now + 900;
+
+      // 방금 막 이탈한 "순간"이라면(직전 프레임까진 도로 위였다면) 급감속 패널티를 새로 트리거
+      // (단, 넉백 중에는 이미 강제로 속도를 제어하고 있으므로 별도의 도로이탈 패널티는 겹쳐 걸지 않는다)
+      if (!wasOffRoad && offroadPenaltyState === 'none' && !inKnockback) {
+        offroadPenaltyState = 'dropping';
+        offroadPenaltyTimer = 0;
+        offroadPenaltyStartSpeed = car.speed;
+        if (car.speed > 0) {
+          offroadPenaltyTargetSpeed = Math.max(0, car.speed - OFFROAD_PENALTY_DROP_MS);
+        } else if (car.speed < 0) {
+          offroadPenaltyTargetSpeed = Math.min(0, car.speed + OFFROAD_PENALTY_DROP_MS);
+        } else {
+          offroadPenaltyTargetSpeed = 0;
+        }
+      }
+      wasOffRoad = true;
+
+      // 1) 가장 가까운 도로 지점을 향한 방향(베어링) 계산
+      const toRoadBearing = turf.bearing(
+        turf.point([candidateLng, candidateLat]),
+        turf.point([roadInfo.lng, roadInfo.lat])
+      );
+
+      // 2) 현재 heading을 그 방향으로 "제한된 속도"로 부드럽게 회전 (한 프레임에 확 꺾이지 않게)
+      let hdiff = toRoadBearing - car.heading;
+      hdiff = ((hdiff + 540) % 360) - 180; // -180~180 사이 최단 회전량으로 정규화
+      const maxTurn = OFFROAD_STEER_RATE_DEG_PER_SEC * dt;
+      car.heading = (car.heading + Math.max(-maxTurn, Math.min(maxTurn, hdiff)) + 360) % 360;
+
+      if (hardBlocked) {
+        // 하드 블록: 방향만 바뀔 뿐, 도로에서 이만큼 멀어지는 이동은 아예 적용하지 않는다.
+        // (다음 프레임에 heading이 도로 쪽으로 더 돌아가면, 그때는 dist가 줄어들어 다시 전진이 허용됨)
+      } else {
+        // 3) 위 속도 갱신 단계(dropping/holding/정상)에서 이미 결정된 car.speed를 그대로 사용해
+        //    보정된 heading/speed로 이번 프레임 위치를 다시 계산, 실제로 도로 쪽으로 밀어 넣는다
+        const hRad2 = car.heading * Math.PI / 180;
+        const dN2 = car.speed * dt * Math.cos(hRad2);
+        const dE2 = car.speed * dt * Math.sin(hRad2);
+        car.lat += dN2 / metersPerDegLat;
+        car.lng += dE2 / metersPerDegLng;
+      }
+    }
+  }
+  if (offroadWarningHideAt && now > offroadWarningHideAt) {
+    offroadWarning.style.display = 'none';
+    offroadWarningHideAt = 0;
+  }
+  if (detectedWarningHideAt && now > detectedWarningHideAt) {
+    document.getElementById('detected-warning').style.display = 'none';
+    detectedWarningHideAt = 0;
+  }
+
+  // --- 지도는 항상 자동차 위치를 중심으로, 북쪽 고정(bearing 0) ---
+  map.jumpTo({ center: [car.lng, car.lat] });
+
+  // --- 자동차 아이콘 자체를 heading만큼 회전 ---
+  // --- 0/360도 경계에서 회전이 튀지 않도록, 화면 표시용 각도를 "최단 방향"으로 연속 갱신 ---
+  let diff = car.heading - visualHeading;
+  diff = ((diff + 180) % 360 + 360) % 360 - 180; // 항상 -180~180 사이의 최단 회전량으로 정규화
+  visualHeading += diff;
+
+  document.getElementById('car').style.transform = `rotate(${visualHeading}deg)`;
+  // 원형 핸들 안의 바늘도 자동차와 항상 같은 방향을 가리키게 동기화
+  wheelNeedle.style.transform = `translateY(-100%) rotate(${visualHeading}deg)`;
+
+  // --- HUD 속도 표시 (m/s -> km/h), 현재 설정된 최고 전진속도도 함께 표시 ---
+  hud.textContent = `속도: ${Math.round(Math.abs(car.speed) * 3.6)} / 최고 ${Math.round(car.maxForwardSpeed * 3.6)} km/h`;
+
+  // --- 점수 갱신: 프레임 시작 위치 대비 "실제로" 이동한 거리만큼만 점수를 더한다 ---
+  // (경찰을 피해 멈춰 서 있거나, 도로 밖으로 막혀서 못 나가거나, 그냥 정차 중이면 이동 거리가 0이라
+  //  자동으로 점수가 오르지 않는다 - 별도의 "정차 감지" 로직이 필요 없다)
+  const movedMeters = turf.distance(
+    turf.point([scoreStartLng, scoreStartLat]), turf.point([car.lng, car.lat]), { units: 'meters' }
+  );
+  score += movedMeters / SCORE_METERS_PER_POINT;
+  scoreHud.textContent = `점수: ${Math.floor(score)}`;
+
+  // --- 웨이브 갱신: 점수가 WAVE_SCORE_STEP(200점)을 넘을 때마다 웨이브를 1씩 올리고, 새 웨이브의 효과를 적용 ---
+  const targetWave = 1 + Math.floor(score / WAVE_SCORE_STEP);
+  while (currentWave < targetWave) {
+    currentWave += 1;
+    applyWaveUpgrade(currentWave, now);
+  }
+
+  // --- 경찰차 추격/체포 판정 갱신 ---
+  updatePoliceCars(dt, now);
+
+  // --- 웨이브4 특수 트럭들 갱신(충돌/체포/화면 밖 이탈/재등장 판정 포함) ---
+  // (트럭이 잠시 0대인 순간에도 재등장 타이머는 계속 흘러야 하므로, 배열 길이가 아니라 웨이브로 판단한다)
+  if (currentWave >= 4) updateSpecialTrucks(dt, now);
+
+  // --- 웨이브6+ 자유주행 "길막" 민간 차량 갱신(충돌 판정 포함) ---
+  if (civilianBlocker) updateCivilianBlocker(dt, now);
+
+  // --- 웨이브5 스파이크 스트립 갱신(밟았는지 판정 포함) ---
+  if (spikeStrips.length > 0) updateSpikeStrips(dt);
+
+  // --- 웨이브6 경찰 헬기 갱신(도로 무시하고 플레이어에게 직진 추격) ---
+  if (policeHelicopter) updateHelicopter(dt, now);
+
+  // --- 경찰차 + 헬기, 모든 추격 수단을 종합한 체포 판정 ---
+  updateCatchStatus(dt);
+
+  requestAnimationFrame(gameLoop);
+}
+
+// 웨이브가 새로 올라갈 때, 해당 웨이브의 난이도 상승 효과를 1회 적용한다.
+// (웨이브는 누적 방식: 2웨이브 효과는 3/4웨이브에서도 계속 유지된다)
+function applyWaveUpgrade(wave, now) {
+  waveHud.textContent = `${wave}웨이브`;
+
+  if (wave === 2) {
+    // 경찰차 대수 +1
+    createPoliceCar(Math.random() * 360);
+  } else if (wave === 3) {
+    // 경찰차 속도(순찰/추격 모두)를 더 빠르게
+    policeWaveSpeedMultiplier = 1.25;
+  } else if (wave === 4) {
+    // 트럭형 특수 경찰차량 등장 (항상 2대)
+    spawnSpecialTrucks();
+  } else if (wave === 5) {
+    // 도로 곳곳에 스파이크 스트립(타이어 파열 장치) 살포
+    spawnSpikeStrips();
+  } else if (wave === 6) {
+    // 경찰 헬기 등장: 도로를 무시하고 곧장 플레이어를 향해 추격(단, 플레이어보다 빠르지는 않음)
+    spawnHelicopter(now);
+    // 자유롭게 돌아다니는 "길막" 민간 차량(녹색) 등장: 추격은 안 하지만 마주치면 부딪혀서 방해가 됨
+    spawnCivilianBlocker();
+  } else if (wave >= 7 && (wave - 7) % 2 === 0) {
+    // 7웨이브에 경찰차 +1, 이후 9/11/13웨이브...처럼 2웨이브마다 계속 +1
+    createPoliceCar(Math.random() * 360);
+  }
+}
+
+// [버그 수정용] 경찰에게 잡힌 뒤 "이어서 계속" 등으로 재시작할 때,
+// clearPoliceCars()가 지워버린 웨이브별 누적 효과(추가 경찰차/트럭/스파이크/헬기/민간차량)를
+// 현재 웨이브에 맞게 다시 스폰해준다. (속도 배율처럼 상태값으로만 존재하는 효과는
+// clearPoliceCars()로 사라지지 않으므로 여기서 다시 건드릴 필요가 없다)
+function respawnWaveEnemies(wave, now) {
+  // 웨이브2에서 추가된 경찰차 +1
+  if (wave >= 2) createPoliceCar(Math.random() * 360);
+  // 웨이브4: 트럭형 특수 경찰차량
+  if (wave >= 4) spawnSpecialTrucks();
+  // 웨이브5: 스파이크 스트립
+  if (wave >= 5) spawnSpikeStrips();
+  // 웨이브6: 헬기 + 민간 "길막" 차량
+  if (wave >= 6) {
+    spawnHelicopter(now);
+    spawnCivilianBlocker();
+  }
+  // 웨이브7부터 2웨이브마다(7,9,11...) 추가된 경찰차 +1씩
+  for (let w = 7; w <= wave; w += 2) {
+    createPoliceCar(Math.random() * 360);
+  }
+}
+
+// 경찰차들의 이동을 처리한다.
+// - patrol(순찰): 플레이어 위치를 전혀 모른 채, 도로를 따라 무작위로 방향을 바꾸며 천천히 순찰한다.
+//   주변에 큰 초록 원(탐지 범위)을 표시하고, 플레이어가 그 안에 들어오면 "발각"되어 chase로 전환된다.
+// - chase(추격): 발각된 상태로, 플레이어를 향해 (플레이어보다 느리지만) 빠르게 추격한다.
+//   작은 빨간 원(체포 판정 범위) 안에 5초를 초과해서 머물면 체포된다.
+// 두 상태 모두 도로 위 유지(하드 블록 포함)는 동일하게 적용된다.
+function updatePoliceCars(dt, now) {
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos(car.lat * Math.PI / 180);
+  const policeChaseSpeed = car.maxForwardSpeed * POLICE_SPEED_FACTOR * policeWaveSpeedMultiplier;   // 추격 중 최고 속도(플레이어보다 느림, 웨이브3+ 배율 적용)
+  const policePatrolSpeed = car.maxForwardSpeed * POLICE_PATROL_SPEED_FACTOR * policeWaveSpeedMultiplier; // 순찰 중 속도(훨씬 느림, 웨이브3+ 배율 적용)
+  const maxTurn = POLICE_STEER_RATE_DEG_PER_SEC * dt;
+
+  let playerInsideAnyCircle = false;
+
+  // 이번 프레임에 추격 중인 경찰차가 여럿이어도 도로 그래프는 한 번만 만들어서 재사용한다(성능 보호).
+  let cachedRoadGraph;
+  let roadGraphBuilt = false;
+  function getRoadGraphCached() {
+    if (!roadGraphBuilt) {
+      cachedRoadGraph = buildRoadGraph();
+      roadGraphBuilt = true;
+    }
+    return cachedRoadGraph;
+  }
+
+  policeCars.forEach((pc) => {
+    // 0) 발각 여부는 이번 프레임의 '이동을 마친 뒤'(최종 위치) 거리로 판정해야
+    //    화면에 그려지는 초록 원과 정확히 일치한다. (아래 3번에서 위치 이동을 마친 뒤 다시 계산해서 사용)
+    //    → 이동 전 위치로 미리 판정해버리면, 경찰차가 순찰하며 다가오는 도중
+    //      "원이 화면상 아직 플레이어에 닿지 않았는데도 발각되는" 오차가 생긴다.
+    let pendingDetect = false;
+
+    // 0-a) 넉백(충돌로 튕겨나가는 중) 처리: 이 동안은 추격/순찰/조향 로직을 전부 건너뛰고,
+    //      정해진 대각선 방향으로 강제로 밀려나며 속도가 점점 0으로 줄어든다. 넉백이 끝나면
+    //      speed=0인 상태에서 다음 프레임부터 평소 로직(추격/순찰)이 다시 자연스럽게 시작된다.
+    if (pc.knockbackTimer > 0) {
+      pc.knockbackTimer = Math.max(0, pc.knockbackTimer - dt);
+      const kt = pc.knockbackTimer / KNOCKBACK_DURATION_SEC; // 1 → 0으로 이즈아웃
+      pc.speed = pc.knockbackSpeed * kt;
+      pc.heading = pc.knockbackHeading;
+      if (pc.knockbackTimer <= 0) pc.speed = 0; // 넉백 종료 → 완전 정지 상태에서 다시 출발
+
+      const kHeadingRad = pc.heading * Math.PI / 180;
+      pc.lat += (pc.speed * dt * Math.cos(kHeadingRad)) / metersPerDegLat;
+      pc.lng += (pc.speed * dt * Math.sin(kHeadingRad)) / metersPerDegLng;
+      pc.lastGoodLat = pc.lat;
+      pc.lastGoodLng = pc.lng;
+
+      if (pc.stunTimer > 0) pc.stunTimer = Math.max(0, pc.stunTimer - dt);
+      if (pc.collisionCooldownTimer > 0) pc.collisionCooldownTimer -= dt;
+      pc.wasCollidingWithPlayer = false;
+
+      // 아이콘/판정 원 위치는 정상적으로 갱신해서, 넉백 중에도 화면상 부드럽게 따라오게 한다.
+      const screenPtKb = map.project([pc.lng, pc.lat]);
+      pc.el.style.transform = `translate(${screenPtKb.x - 7}px, ${screenPtKb.y - 12}px) rotate(${pc.heading}deg)`;
+      const radiusMetersKb = pc.state === 'chase' ? CATCH_RADIUS_METERS : POLICE_DETECTION_RADIUS_METERS;
+      const diameterPxKb = 2 * metersToScreenPixels(pc.lat, pc.lng, radiusMetersKb);
+      pc.circleEl.style.width = `${diameterPxKb}px`;
+      pc.circleEl.style.height = `${diameterPxKb}px`;
+      pc.circleEl.style.transform = `translate(${screenPtKb.x - diameterPxKb / 2}px, ${screenPtKb.y - diameterPxKb / 2}px)`;
+      // [수정] 이미 체포 카운트가 진행 중이었다면(caughtTimer > 0), 넉백으로 서로 튕겨나가는 동안에도
+      // "포위 중" 상태를 그대로 유지시켜 카운트가 끊기지 않고 계속 이어지게 한다.
+      // (원래는 넉백 중엔 이 아래 return으로 판정 자체를 건너뛰어서, updateCatchStatus()의
+      //  isSurrounded가 false가 되어 caughtTimer가 즉시 0으로 리셋돼버렸다 → 체포 직전에 일부러
+      //  경찰차를 들이받아 카운트를 무효화하는 꼼수가 가능했던 원인. 이미 카운트가 시작된 뒤의
+      //  충돌이라면 계속 이어서 세지도록, 여기서도 판정을 살려둔다.)
+      if (pc.state === 'chase' && caughtTimer > 0) {
+        playerInsideAnyCircle = true;
+        catchSourcePos = { lat: pc.lat, lng: pc.lng, radiusMeters: CATCH_RADIUS_METERS, holdSeconds: CATCH_HOLD_SECONDS };
+        // 카운트가 계속 이어지고 있음을 시각적으로도 보여주기 위해, 이 경우에는 판정 원을 숨기지 않는다.
+        pc.circleEl.style.display = '';
+      } else {
+        pc.circleEl.style.display = 'none'; // 넉백 중에는 체포/탐지 판정 원을 숨겨서 "서로 튕겨나가 잠시 놓쳤다"는 느낌을 준다
+      }
+      return; // 넉백 중엔 추격/순찰/충돌판정 등 나머지 로직을 전부 건너뜀
+    }
+
+    // 1) 속도: 상태에 따라 다른 목표 속도를 향해 가속/감속
+    const targetSpeed = pc.state === 'chase' ? policeChaseSpeed : policePatrolSpeed;
+    if (pc.speed < targetSpeed) pc.speed = Math.min(targetSpeed, pc.speed + car.accel * dt);
+    else if (pc.speed > targetSpeed) pc.speed = Math.max(targetSpeed, pc.speed - car.accel * dt);
+
+    // 2) 조향: 추격 중이면 "도로를 따라가는 경로"의 다음 지점을 향해, 순찰 중이면 스스로 정한(무작위로 바뀌는) 순찰 방향을 향해 튼다
+    let desiredBearing;
+    if (pc.state === 'chase') {
+      // 2-0) 플레이어와 이미 충분히 가까우면(도로 그래프가 촘촘한 주차장/골목 등에서
+      //      매번 다른 노드로 경로가 재계산되며 제자리를 맴도는 것을 막기 위해),
+      //      복잡한 길찾기 없이 플레이어를 향해 곧장 조향한다. (도로 밖 이탈 보정은 3번에서 그대로 적용됨)
+      const distNowForSteer = turf.distance(
+        turf.point([pc.lng, pc.lat]), turf.point([car.lng, car.lat]), { units: 'meters' }
+      );
+      if (distNowForSteer <= POLICE_DIRECT_CHASE_RANGE_M) {
+        desiredBearing = turf.bearing(turf.point([pc.lng, pc.lat]), turf.point([car.lng, car.lat]));
+        pc.route = null;        // 멀어지면 다시 정상적으로 경로를 새로 계산하도록 캐시를 비워둔다
+        pc.routeIndex = 0;
+        pc.routeRecalcTimer = 0;
+      } else {
+      // 2-a) 경로가 없거나, 다 왔거나, 재계산 주기가 됐으면 새로 길찾기를 시도한다.
+      pc.routeRecalcTimer -= dt;
+      const needsNewRoute = !pc.route || pc.routeIndex >= pc.route.length || pc.routeRecalcTimer <= 0;
+      if (needsNewRoute) {
+        const graph = getRoadGraphCached();
+        const path = graph ? findRoutePath(graph, pc.lng, pc.lat, car.lng, car.lat, POLICE_ROUTE_START_SNAP_MAX_M) : null;
+        pc.route = path;       // 못 찾으면 null → 아래에서 기존 직선 추격으로 자동 대체됨(안전장치)
+        pc.routeIndex = 0;
+        pc.routeRecalcTimer = POLICE_ROUTE_RECALC_INTERVAL_SEC;
+      }
+
+      if (pc.route && pc.routeIndex < pc.route.length) {
+        // 2-b) 지금 향하는 웨이포인트에 충분히 가까워졌으면 다음 웨이포인트로 넘어감(여러 개를 한 번에 지나칠 수도 있음)
+        let target = pc.route[pc.routeIndex];
+        let dToTarget = turf.distance(turf.point([pc.lng, pc.lat]), turf.point(target), { units: 'meters' });
+        while (dToTarget <= POLICE_ROUTE_WAYPOINT_ARRIVE_M && pc.routeIndex < pc.route.length - 1) {
+          pc.routeIndex++;
+          target = pc.route[pc.routeIndex];
+          dToTarget = turf.distance(turf.point([pc.lng, pc.lat]), turf.point(target), { units: 'meters' });
+        }
+        desiredBearing = turf.bearing(turf.point([pc.lng, pc.lat]), turf.point(target));
+      } else {
+        // 길찾기가 실패한 경우(도로 데이터 없음/그래프 끊김 등)에 한해서만, 기존처럼 플레이어를 향한 직선 방향을 사용
+        desiredBearing = turf.bearing(turf.point([pc.lng, pc.lat]), turf.point([car.lng, car.lat]));
+      }
+      }
+    } else {
+      pc.wanderTimer -= dt;
+      if (pc.wanderTimer <= 0) {
+        // 순찰 방향을 무작위로 새로 정함 (플레이어 위치와는 무관 - "전혀 내 위치를 모른 채" 돌아다님)
+        pc.wanderHeading = pc.heading + (Math.random() * 2 - 1) * POLICE_WANDER_TURN_RANGE_DEG;
+        pc.wanderTimer = POLICE_WANDER_MIN_INTERVAL_SEC + Math.random() * (POLICE_WANDER_MAX_INTERVAL_SEC - POLICE_WANDER_MIN_INTERVAL_SEC);
+      }
+      desiredBearing = pc.wanderHeading;
+    }
+    let hdiff = desiredBearing - pc.heading;
+    hdiff = ((hdiff + 540) % 360) - 180;
+    pc.heading = (pc.heading + Math.max(-maxTurn, Math.min(maxTurn, hdiff)) + 360) % 360;
+
+    // 3) 후보 위치를 계산한 뒤, 도로 위인지 확인해서 도로 밖이면 도로 쪽으로 조향을 보정한다.
+    //    - 주변에 도로 정보가 아예 없는 경우(강/공터 등)에는 "마지막으로 도로 위였던 위치" 쪽으로 되돌아간다.
+    //    - 많이 벗어난 경우(OFFROAD_HARD_BLOCK_METERS 초과)에는 방향만 바뀔 뿐 전진 자체를 막는다.
+    let headingRad = pc.heading * Math.PI / 180;
+    let candLat = pc.lat + (pc.speed * dt * Math.cos(headingRad)) / metersPerDegLat;
+    let candLng = pc.lng + (pc.speed * dt * Math.sin(headingRad)) / metersPerDegLng;
+
+    const roadInfo = findRoadPointNear(candLat, candLng, OFFROAD_DETECT_RANGE_METERS);
+    const onRoad = roadInfo && roadInfo.dist <= ROAD_HALF_WIDTH_METERS * 3;
+    const hardBlocked = roadInfo && roadInfo.dist > OFFROAD_HARD_BLOCK_METERS;
+
+    if (!onRoad) {
+      const targetLng = roadInfo ? roadInfo.lng : pc.lastGoodLng;
+      const targetLat = roadInfo ? roadInfo.lat : pc.lastGoodLat;
+      const toRoadBearing = turf.bearing(turf.point([candLng, candLat]), turf.point([targetLng, targetLat]));
+      let hd2 = toRoadBearing - pc.heading;
+      hd2 = ((hd2 + 540) % 360) - 180;
+      pc.heading = (pc.heading + Math.max(-maxTurn, Math.min(maxTurn, hd2)) + 360) % 360;
+
+      if (hardBlocked) {
+        candLat = pc.lat;
+        candLng = pc.lng;
+      } else {
+        headingRad = pc.heading * Math.PI / 180;
+        candLat = pc.lat + (pc.speed * dt * Math.cos(headingRad)) / metersPerDegLat;
+        candLng = pc.lng + (pc.speed * dt * Math.sin(headingRad)) / metersPerDegLng;
+      }
+    } else {
+      pc.lastGoodLat = candLat;
+      pc.lastGoodLng = candLng;
+    }
+    pc.lat = candLat;
+    pc.lng = candLng;
+
+    // 4) 체포 판정: "추격" 상태일 때만 유효 (순찰 중에는 근처를 지나가도 붙잡히지 않음)
+    //    - 반드시 "이번 프레임 이동을 마친 뒤"의 최종 위치로 다시 거리 계산 → 화면에 그려지는 원과
+    //      정확히 같은 기준으로 판정해서, 눈에 보이는 것보다 넓게 잡히는 오차를 없앤다.
+    const distToPlayerAfterMove = turf.distance(
+      turf.point([pc.lng, pc.lat]), turf.point([car.lng, car.lat]), { units: 'meters' }
+    );
+
+    // 4-a) 경찰차 ↔ 플레이어 몸통 박치기(직접 충돌) 판정.
+    //      큰 직선 도로에서는 경찰차가 플레이어보다 느려서 체포 범위(25m) 안으로 영원히 못 들어올 수 있는데,
+    //      실제로 맞닿을 만큼 가까워지면 서로 강하게 튕겨나가게 해서 따돌리기만 하는 것을 막는다.
+    if (pc.collisionCooldownTimer > 0) pc.collisionCooldownTimer -= dt;
+    if (pc.stunTimer > 0) pc.stunTimer = Math.max(0, pc.stunTimer - dt);
+    // 화면에 그려지는 아이콘 위치를 구할 때 쓰는 것과 완전히 동일한 함수(map.project)로
+    // 두 차량의 "실제 화면 픽셀 좌표"를 구해서 그 사이의 픽셀 거리로 판정한다.
+    // (줌 레벨→미터/픽셀 근사 공식을 쓰면 지도 라이브러리의 타일 크기 기준에 따라 실제 화면과
+    //  어긋날 수 있어, 아이콘이 눈으로 보기엔 안 겹쳤는데도 충돌로 판정되는 오차가 생길 수 있었다.
+    //  map.project()는 아이콘을 그릴 때 쓰는 좌표 변환과 100% 동일하므로 이런 오차가 있을 수 없다.)
+    const playerScreenPt = map.project([car.lng, car.lat]);
+    const pcScreenPtForHit = map.project([pc.lng, pc.lat]);
+    const hitPixelDist = Math.hypot(playerScreenPt.x - pcScreenPtForHit.x, playerScreenPt.y - pcScreenPtForHit.y);
+    const isPlayerCollision = hitPixelDist <= CAR_ICON_HIT_RADIUS_PX * 2;
+    if (isPlayerCollision && !pc.wasCollidingWithPlayer && pc.collisionCooldownTimer <= 0) {
+      // 방금 충돌한 순간(직전 프레임까진 맞닿지 않았음) → 경찰차 진행방향 기준 좌/우 어느 쪽에서
+      // 부딪혔는지 계산해서, 두 차량이 서로 반대쪽 "뒤" 대각선으로 튕겨나가게 한다.
+      const headingRadNow = pc.heading * Math.PI / 180;
+      const dNorth = (car.lat - pc.lat) * metersPerDegLat;
+      const dEast = (car.lng - pc.lng) * metersPerDegLng;
+      const perp = -dNorth * Math.sin(headingRadNow) + dEast * Math.cos(headingRadNow);
+      const side = perp >= 0 ? 1 : -1;
+
+      // 충돌 "순간" 두 차량 모두 즉시 완전 정지 → 그 다음 정해진 시간(KNOCKBACK_DURATION_SEC) 동안
+      // 조향/가속 입력을 무시하고 강제로 대각선 뒤쪽으로 밀려난다(넉백). 넉백이 끝나면 완전히 멈춘
+      // 상태에서 다시 처음부터 가속해서 출발하게 되므로, "부딪혀서 밀려났다"는 느낌이 확실해진다.
+      const playerKnockHeading = (car.heading + 180 + side * KNOCKBACK_ANGLE_DEG + 360) % 360;
+      const policeKnockHeading = (pc.heading + 180 - side * KNOCKBACK_ANGLE_DEG + 360) % 360;
+
+      car.speed = 0;
+      car.heading = playerKnockHeading;
+      car.knockbackHeading = playerKnockHeading;
+      car.knockbackSpeed = KNOCKBACK_SPEED_MS;
+      car.knockbackTimer = KNOCKBACK_DURATION_SEC;
+      car.knockbackDuration = KNOCKBACK_DURATION_SEC;
+      car.knockbackEndSpeed = 0; // 경찰차 충돌은 트럭과 달리 완전 정지까지 이즈아웃
+      car.collisionAccelBoostTimer = PLAYER_POST_COLLISION_ACCEL_SECONDS; // 넉백이 끝난 뒤 재가속이 경찰차보다 훨씬 빠르게 이루어지도록
+
+      pc.speed = 0;
+      pc.heading = policeKnockHeading;
+      pc.knockbackHeading = policeKnockHeading;
+      pc.knockbackSpeed = KNOCKBACK_SPEED_MS;
+      pc.knockbackTimer = KNOCKBACK_DURATION_SEC;
+      pc.state = 'chase';
+      pc.route = null;
+      pc.routeIndex = 0;
+      pc.routeRecalcTimer = 0;
+
+      // 즉시 서로를 최소 거리만큼 떨어뜨려서(순간이동), 겹쳐진 채로 다음 프레임을 맞이하지 않게 한다.
+      const sepRad = playerKnockHeading * Math.PI / 180;
+      car.lat += (Math.cos(sepRad) * KNOCKBACK_SEPARATION_M) / metersPerDegLat;
+      car.lng += (Math.sin(sepRad) * KNOCKBACK_SEPARATION_M) / metersPerDegLng;
+      const sepRadPc = policeKnockHeading * Math.PI / 180;
+      pc.lat += (Math.cos(sepRadPc) * KNOCKBACK_SEPARATION_M) / metersPerDegLat;
+      pc.lng += (Math.sin(sepRadPc) * KNOCKBACK_SEPARATION_M) / metersPerDegLng;
+
+      pc.collisionCooldownTimer = POLICE_COLLISION_HIT_COOLDOWN_SEC;
+      pc.stunTimer = POLICE_COLLISION_STUN_SECONDS; // 이 시간 동안 체포 판정(빨간 원)이 사라짐. 단, 체포 카운트가 이미 진행 중이었다면 예외적으로 계속 판정됨(꼼수 방지)
+    }
+    pc.wasCollidingWithPlayer = isPlayerCollision;
+
+    // 스턴(충돌 직후 5초) 중이라도, 이미 체포 카운트가 진행 중이었다면(caughtTimer > 0)
+    // 판정에서 제외하지 않는다. → 체포되기 직전에 일부러 경찰차를 들이받아 카운트를
+    // 0으로 되돌리는 꼼수를 막기 위함. (처음 마주쳐서 아직 카운트가 시작되지 않은
+    // 상태에서 충돌한 경우에는 기존처럼 스턴 동안 판정에서 빠진다.)
+    const catchEligibleDespiteStun = pc.stunTimer <= 0 || caughtTimer > 0;
+    if (pc.state === 'chase' && catchEligibleDespiteStun && distToPlayerAfterMove <= CATCH_RADIUS_METERS) {
+      playerInsideAnyCircle = true;
+      catchSourcePos = { lat: pc.lat, lng: pc.lng, radiusMeters: CATCH_RADIUS_METERS, holdSeconds: CATCH_HOLD_SECONDS };
+    }
+    // 순찰 중이었다면, 이동을 마친 최종 위치 기준으로 탐지 범위(초록 원) 안에
+    // 플레이어가 실제로 들어왔는지 확인한다 → 이 값이 6번에서 그려지는 원과 완전히 동일한 기준.
+    if (pc.state === 'patrol' && distToPlayerAfterMove <= POLICE_DETECTION_RADIUS_METERS) {
+      pendingDetect = true;
+    }
+
+    // 5) 너무 오래 플레이어에게서 멀리 떨어져 있으면 재배치한다.
+    //    - 추격 중: "무전 네트워크"로 다른 차가 앞쪽에 새로 나타나는 것처럼 재배치 (기존과 동일)
+    //    - 순찰 중: 플레이어 근처에서 계속 순찰이 이루어지도록, 너무 멀어지면 근처로 다시 재배치
+    const giveupDistance = pc.state === 'chase' ? POLICE_GIVEUP_DISTANCE_M : POLICE_PATROL_MAX_DIST_M;
+    if (distToPlayerAfterMove > giveupDistance) {
+      pc.farTimer += dt;
+      if (pc.farTimer >= POLICE_GIVEUP_HOLD_SECONDS) {
+        redeployPoliceCar(pc);
+        return; // 재배치 직후이므로 이번 프레임의 아이콘/원 갱신은 다음 프레임에 정상적으로 이루어짐
+      }
+    } else {
+      pc.farTimer = 0;
+    }
+
+    // 6) 화면 좌표로 변환해서 경찰차 아이콘과 원(순찰=탐지범위 / 추격=체포범위)의 위치·크기를 갱신
+    const screenPt = map.project([pc.lng, pc.lat]);
+    pc.el.style.transform = `translate(${screenPt.x - 7}px, ${screenPt.y - 12}px) rotate(${pc.heading}deg)`;
+
+    const radiusMeters = pc.state === 'chase' ? CATCH_RADIUS_METERS : POLICE_DETECTION_RADIUS_METERS;
+    const diameterPx = 2 * metersToScreenPixels(pc.lat, pc.lng, radiusMeters);
+    pc.circleEl.style.width = `${diameterPx}px`;
+    pc.circleEl.style.height = `${diameterPx}px`;
+    pc.circleEl.style.transform = `translate(${screenPt.x - diameterPx / 2}px, ${screenPt.y - diameterPx / 2}px)`;
+    // 충돌 직후(스턴 중)에는 체포 판정 원을 잠시 감춰서, "부딪혀서 잠깐 서로 놓쳤다"는 느낌을 준다.
+    // 단, 이미 체포 카운트가 진행 중이었다면(caughtTimer > 0) 실제로도 계속 잡혀 있는 것이므로
+    // 원을 감추지 않고 그대로 보여준다(카운트가 계속 돌아가고 있음을 시각적으로도 알 수 있게).
+    pc.circleEl.style.display = (pc.state === 'chase' && pc.stunTimer > 0 && caughtTimer <= 0) ? 'none' : '';
+
+    // 7) 원을 다 그린 뒤에야 비로소 실제 상태 전환을 적용한다.
+    //    → 유저는 방금 6번에서 그려진 "초록 탐지 원이 자기 차를 감싸고 있는" 화면을 실제로 보게 되고,
+    //      그 다음 프레임부터 추격(빨간 원)으로 바뀐다.
+    if (pendingDetect) {
+      triggerDetected(pc, now);
+    }
+  });
+
+  // 이번 프레임에 경찰차(추격 상태) 중 하나라도 플레이어를 체포 범위 안에 두고 있었는지 기록해둔다.
+  // 실제 체포 타이머 누적/판정은 헬기 쪽 결과와 합쳐서 updateCatchStatus()에서 한 번에 처리한다.
+  policeCarsCatchingPlayer = playerInsideAnyCircle;
+}
+
+// 경찰차 + 경찰 헬기 등 모든 추격 수단의 체포 판정을 한 곳에서 종합해서 처리한다.
+// 여러 수단 중 하나라도 이번 프레임에 플레이어를 포위 범위 안에 두고 있으면 체포 타이머가 올라간다.
+function updateCatchStatus(dt) {
+  const catchWarning = document.getElementById('catch-warning');
+  const isSurrounded = policeCarsCatchingPlayer || helicopterCatchingPlayer || truckCatchingPlayer;
+  if (isSurrounded && catchSourcePos) {
+    caughtTimer += dt;
+    const holdSeconds = catchSourcePos.holdSeconds || CATCH_HOLD_SECONDS; // 소스별(경찰차/헬기) 체포 유지시간. 지정 안 돼있으면 기본값(경찰차 5초) 사용
+    const remaining = Math.max(0, holdSeconds - caughtTimer);
+    catchWarning.style.display = 'block';
+    catchWarning.textContent = `경찰에게 포위됨! ${remaining.toFixed(1)}초 후 체포`;
+
+    // 경고 문구를 체포 판정 중인 경찰차(또는 헬기)의 화면 좌표 바로 위에 띄운다.
+    const srcPt = map.project([catchSourcePos.lng, catchSourcePos.lat]);
+    const srcRadiusPx = metersToScreenPixels(catchSourcePos.lat, catchSourcePos.lng, catchSourcePos.radiusMeters);
+    catchWarning.style.transform = `translate(${srcPt.x}px, ${srcPt.y - srcRadiusPx - 14}px) translate(-50%, -100%)`;
+
+    if (caughtTimer >= holdSeconds) triggerCaught();
+  } else {
+    caughtTimer = 0;
+    catchSourcePos = null;
+    catchWarning.style.display = 'none';
+  }
+}
+
+// 순찰 중이던 경찰차가 플레이어를 "발각"했을 때 호출: 추격 상태로 전환하고, 사이렌 + 배너를 띄운다.
+function triggerDetected(pc, now) {
+  pc.state = 'chase';
+  pc.circleEl.classList.remove('mode-patrol');
+  pc.circleEl.classList.add('mode-chase');
+  // 방금 추격을 시작했으므로, 다음 프레임에 곧바로 도로 기반 경로를 새로 계산하게 한다.
+  pc.route = null;
+  pc.routeIndex = 0;
+  pc.routeRecalcTimer = 0;
+
+  playSirenBeep();
+
+  const el = document.getElementById('detected-warning');
+  el.textContent = '🚨 발각됨!'; // 헬기 출동 문구로 바뀌어 있었을 수 있으므로 일반 발각 문구로 되돌림
+  el.style.display = 'block';
+  detectedWarningHideAt = now + DETECTED_WARNING_DURATION_MS;
+}
+
+// 짧은 사이렌 효과음을 Web Audio API로 직접 생성해서 재생한다(별도 음원 파일 불필요).
+function playSirenBeep() {
+  try {
+    if (!window.__policeAudioCtx) {
+      window.__policeAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    const ctx = window.__policeAudioCtx;
+    if (ctx.state === 'suspended') ctx.resume();
+
+    const startAt = ctx.currentTime;
+    const duration = 0.55;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    // 사이렌 특유의 오르내리는 음(우~이~ 우~이~)을 흉내낸 주파수 변화
+    osc.frequency.setValueAtTime(650, startAt);
+    osc.frequency.linearRampToValueAtTime(1000, startAt + 0.14);
+    osc.frequency.linearRampToValueAtTime(650, startAt + 0.28);
+    osc.frequency.linearRampToValueAtTime(1000, startAt + 0.42);
+    osc.frequency.linearRampToValueAtTime(650, startAt + 0.55);
+
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.linearRampToValueAtTime(0.28, startAt + 0.03);
+    gain.gain.linearRampToValueAtTime(0.0001, startAt + duration);
+
+    osc.start(startAt);
+    osc.stop(startAt + duration + 0.05);
+  } catch (e) {
+    // 오디오 재생이 막힌 환경(자동재생 제한 등)이면 조용히 무시하고 게임은 계속 진행
+  }
+}
+
+// 플레이어를 너무 오래 놓친 경찰차를, 플레이어가 "가고 있는 방향" 앞쪽 어딘가로 재배치한다.
+// (실제로는 같은 차량 객체를 옮기는 것이지만, 플레이어 입장에서는 "무전 받은 새 경찰차가 앞에 나타난 것"처럼 보인다)
+function redeployPoliceCar(pc) {
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos(car.lat * Math.PI / 180);
+
+  // 플레이어의 현재 진행 방향(heading) 기준으로, 좌우로 약간 퍼진 각도 + 앞쪽 거리를 여러 번 시도해
+  // "실제로 도로 위인" 지점을 찾는다.
+  let lat = null, lng = null, bearingDeg = car.heading;
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const angleOffset = (Math.random() * 2 - 1) * POLICE_RESPAWN_ANGLE_SPREAD_DEG;
+    const tryBearing = car.heading + angleOffset;
+    const tryDist = POLICE_RESPAWN_AHEAD_MIN_M + Math.random() * (POLICE_RESPAWN_AHEAD_MAX_M - POLICE_RESPAWN_AHEAD_MIN_M);
+    const bearingRad = tryBearing * Math.PI / 180;
+    const tryLat = car.lat + (tryDist * Math.cos(bearingRad)) / metersPerDegLat;
+    const tryLng = car.lng + (tryDist * Math.sin(bearingRad)) / metersPerDegLng;
+
+    const roadInfo = findRoadPointNear(tryLat, tryLng, 35);
+    if (roadInfo) {
+      lat = roadInfo.lat;
+      lng = roadInfo.lng;
+      bearingDeg = tryBearing;
+      break;
+    }
+  }
+  // 그래도 못 찾았으면, 마지막으로 도로 위였던 자기 위치를 그대로 유지한다 (건물/강 위로 순간이동하지 않도록)
+  if (lat === null) {
+    lat = pc.lastGoodLat;
+    lng = pc.lastGoodLng;
+  }
+
+  pc.lat = lat;
+  pc.lng = lng;
+  pc.heading = bearingDeg;
+  pc.speed = 0;       // 새로 배치된 것처럼 정지 상태에서 다시 가속 시작
+  pc.farTimer = 0;
+  pc.lastGoodLat = lat;
+  pc.lastGoodLng = lng;
+  pc.wasCollidingWithPlayer = false;
+  pc.collisionCooldownTimer = 0;
+  pc.stunTimer = 0;
+  pc.knockbackTimer = 0;
+  pc.knockbackSpeed = 0;
+
+  // 발각 시스템을 없앴으므로, 재배치된 차량도 순찰 없이 곧바로 다시 추격을 시작한다.
+  pc.state = 'chase';
+  pc.route = null;
+  pc.routeIndex = 0;
+  pc.routeRecalcTimer = 0;
+  pc.wanderHeading = bearingDeg;
+  pc.wanderTimer = POLICE_WANDER_MIN_INTERVAL_SEC + Math.random() * (POLICE_WANDER_MAX_INTERVAL_SEC - POLICE_WANDER_MIN_INTERVAL_SEC);
+  pc.circleEl.classList.remove('mode-patrol');
+  pc.circleEl.classList.add('mode-chase');
+}
+
+// 체포 확정: 모든 차량을 멈추고, "다시 도전하기" 버튼이 있는 오버레이를 띄운다.
+function triggerCaught() {
+  isCaught = true;
+  car.speed = 0;
+  policeCars.forEach((pc) => { pc.speed = 0; });
+  specialTrucks.forEach((tc) => { tc.speed = 0; });
+  if (policeHelicopter) policeHelicopter.speed = 0;
+  document.getElementById('catch-warning').style.display = 'none';
+  document.getElementById('caught-overlay').style.display = 'flex';
+}
+
+// 화면 위의 경찰차 DOM(아이콘 + 체포 원)을 모두 지우고, 배열도 비운다. 특수 트럭도 함께 정리한다.
+function clearPoliceCars() {
+  policeCars.forEach((pc) => {
+    pc.el.remove();
+    pc.circleEl.remove();
+  });
+  policeCars = [];
+  caughtTimer = 0;
+  policeCarsCatchingPlayer = false;
+  removeSpecialTrucks();
+  removeSpikeStrips();
+  removeHelicopter();
+  removeCivilianBlocker();
+}
+
+// 웨이브4에서 등장하는 특수 경찰 트럭들을 항상 TRUCK_COUNT(2)대 스폰한다.
+// [특수능력] 트럭은 헬기처럼 도로/건물을 완전히 무시하고, 언제나 플레이어를 향해
+// 최단 직선으로 아주 빠르게 곧장 돌진하는 "몸통 박치기 전용" 차량이다.
+function spawnSpecialTrucks() {
+  if (specialTrucks.length > 0) return; // 이미 있다면 중복 생성하지 않음
+  for (let i = 0; i < TRUCK_COUNT; i++) {
+    // 두 대가 겹쳐서 나오지 않도록, 서로 다른 방향(약 180도 간격 ± 무작위)에서 스폰한다.
+    const baseBearing = i * (360 / TRUCK_COUNT) + (Math.random() * 40 - 20);
+    spawnOneSpecialTruck(baseBearing);
+  }
+}
+
+// 트럭 한 대를 플레이어 주변의 지정된 방향(baseBearing) 근처, 무작위 거리에 배치한다.
+// 트럭은 건물/도로를 무시하고 자유롭게 움직이므로, 스폰 지점도 도로 여부를 따지지 않는다.
+function spawnOneSpecialTruck(baseBearing) {
+  const layer = document.getElementById('police-layer');
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos(car.lat * Math.PI / 180);
+
+  const dist = POLICE_SPAWN_MIN_DIST_M + Math.random() * (POLICE_SPAWN_MAX_DIST_M - POLICE_SPAWN_MIN_DIST_M);
+  const bearingRad = baseBearing * Math.PI / 180;
+  const lat = car.lat + (dist * Math.cos(bearingRad)) / metersPerDegLat;
+  const lng = car.lng + (dist * Math.sin(bearingRad)) / metersPerDegLng;
+
+  const el = document.createElement('div');
+  el.className = 'police-truck';
+  // 트럭은 일반 경찰차보다 훨씬 긴 직사각형 형태로 표현(진행방향 기준 세로로 긴 화물칸 + 앞쪽 캡)
+  el.innerHTML = `
+    <svg viewBox="0 0 34 90">
+      <rect x="3" y="1" width="28" height="88" rx="4" fill="#3a3f4a" stroke="#14171d" stroke-width="1.5"/>
+      <rect x="6" y="6" width="22" height="18" rx="2" fill="#1a2733" opacity="0.85"/>
+      <rect class="police-light" x="9" y="28" width="16" height="6" rx="1.5" fill="#ff3b3b"/>
+      <rect x="6" y="40" width="22" height="44" rx="2" fill="#4a5060" opacity="0.9"/>
+    </svg>`;
+  layer.appendChild(el);
+
+  // [특수능력] 경찰차/헬기와 동일한 스타일의 빨간 체포 판정 원을 트럭에도 붙인다.
+  const circleEl = document.createElement('div');
+  circleEl.className = 'catch-circle mode-chase';
+  layer.appendChild(circleEl);
+
+  specialTrucks.push({
+    lat, lng, heading: baseBearing, speed: 0,
+    el, circleEl,
+    wasCollidingWithPlayer: false,
+    hitCooldownTimer: 0,
+    state: 'chasing', // 'chasing'(플레이어를 향해 조향하며 추격) → 충돌 시 'breakthrough'(그 방향 그대로 직진해서 화면 밖으로 이탈)
+  });
+}
+
+// 트럭 DOM(아이콘 + 체포 원)을 모두 지우고 배열을 비운다.
+function removeSpecialTrucks() {
+  specialTrucks.forEach((tc) => {
+    tc.el.remove();
+    tc.circleEl.remove();
+  });
+  specialTrucks = [];
+  truckCatchingPlayer = false;
+  truckRespawnTimer = 0;
+}
+
+// 특수 트럭들의 이동 + 플레이어와의 충돌/체포 판정을 처리한다.
+// - [특수능력] 도로 위인지, 건물이 앞을 막는지는 전혀 신경 쓰지 않는다(헬기와 동일한 방식) →
+//   지도 위 어디든 최단 직선으로 곧장 플레이어를 향해 아주 빠르게 돌진한다.
+// - [돌파형] 정면 충돌 순간, 플레이어를 그 방향으로 강하게 튕겨내면서(속도도 100km/h만큼 깎아서 피해를 줌)
+//   트럭 자신은 더 이상 맴돌지 않고 그대로 직진만 계속해서 화면 밖으로 완전히 빠져나간다.
+//   화면 밖으로 나가면 그 트럭은 사라지고, 잠시 뒤 새 트럭이 다시 어딘가에서 돌진해온다.
+// - [특수능력] "추격" 상태일 때만 경찰차와 동일한 빨간 원(체포 판정 범위)이 유효하다. 한 번 들이받고
+//   "돌파" 상태가 된 트럭은 이미 스쳐 지나가는 중이므로 더 이상 체포 위협이 되지 않는다.
+function updateSpecialTrucks(dt, now) {
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos(car.lat * Math.PI / 180);
+  const truckSpeed = car.maxForwardSpeed * TRUCK_SPEED_FACTOR;
+  const maxTurn = TRUCK_STEER_RATE_DEG_PER_SEC * dt;
+
+  let anyTruckCatching = false;
+  const trucksToRemove = [];
+
+  specialTrucks.forEach((tc) => {
+    // 1) 속도: 최고 속도(플레이어보다 훨씬 빠름)를 향해 가속. 돌파 중에도 전속력을 유지해서 시원하게 빠져나간다.
+    if (tc.speed < truckSpeed) tc.speed = Math.min(truckSpeed, tc.speed + car.accel * dt);
+    else if (tc.speed > truckSpeed) tc.speed = Math.max(truckSpeed, tc.speed - car.accel * dt);
+
+    // 2) 조향: "추격" 상태일 때만 플레이어를 향해 조향한다. "돌파" 상태가 되면 조향을 멈추고
+    //    충돌 순간의 방향을 그대로 유지한 채 계속 직진만 한다(= 그대로 뚫고 지나가서 화면 밖으로 사라짐).
+    if (tc.state === 'chasing') {
+      const desiredBearing = turf.bearing(turf.point([tc.lng, tc.lat]), turf.point([car.lng, car.lat]));
+      let hdiff = desiredBearing - tc.heading;
+      hdiff = ((hdiff + 540) % 360) - 180;
+      tc.heading = (tc.heading + Math.max(-maxTurn, Math.min(maxTurn, hdiff)) + 360) % 360;
+    }
+
+    // 3) 위치 이동: 도로 스냅/이탈 판정 없이 자유롭게(건물도 그대로 뚫고) 직진 이동
+    const headingRad = tc.heading * Math.PI / 180;
+    tc.lat += (tc.speed * dt * Math.cos(headingRad)) / metersPerDegLat;
+    tc.lng += (tc.speed * dt * Math.sin(headingRad)) / metersPerDegLng;
+
+    // 4) 화면 좌표로 변환해서 트럭 아이콘 + 체포 판정 원의 위치/크기 갱신
+    const screenPt = map.project([tc.lng, tc.lat]);
+    tc.el.style.transform = `translate(${screenPt.x - 7}px, ${screenPt.y - 22}px) rotate(${tc.heading}deg)`;
+
+    const diameterPx = 2 * metersToScreenPixels(tc.lat, tc.lng, TRUCK_CATCH_RADIUS_METERS);
+    tc.circleEl.style.width = `${diameterPx}px`;
+    tc.circleEl.style.height = `${diameterPx}px`;
+    tc.circleEl.style.transform = `translate(${screenPt.x - diameterPx / 2}px, ${screenPt.y - diameterPx / 2}px)`;
+    // 돌파 상태로 스쳐 지나가는 트럭은 더 이상 체포 위협이 아니므로 빨간 원을 숨긴다.
+    tc.circleEl.style.display = tc.state === 'breakthrough' ? 'none' : '';
+
+    const dNorth = (car.lat - tc.lat) * metersPerDegLat;
+    const dEast = (car.lng - tc.lng) * metersPerDegLng;
+
+    // 5) 몸통 박치기(직사각형) 충돌 판정: "추격" 상태에서 정면으로 부딪힌 바로 그 한 번만 처리한다.
+    if (tc.state === 'chasing') {
+      const headingRadNow = tc.heading * Math.PI / 180;
+      // along: 트럭이 바라보는 방향으로 얼마나 앞/뒤에 있는지, perp: 그 방향의 좌/우로 얼마나 떨어져 있는지
+      const along = dNorth * Math.cos(headingRadNow) + dEast * Math.sin(headingRadNow);
+      const perp = -dNorth * Math.sin(headingRadNow) + dEast * Math.cos(headingRadNow);
+      const isColliding = Math.abs(along) <= TRUCK_LENGTH_M / 2 && Math.abs(perp) <= TRUCK_WIDTH_M / 2;
+
+      if (isColliding) {
+        // 정면으로 들이받힌 순간 → 트럭은 이제부터 조향을 멈추고 이 방향 그대로 뚫고 지나가는
+        // "돌파" 상태로 전환된다(위 2번 조향 로직에서 자동으로 직진만 하게 됨).
+        tc.state = 'breakthrough';
+
+        // [피해] 충돌 시점 속도(km/h)에서 100km/h만큼 깎는다(0 밑으로는 내려가지 않음).
+        const preHitSpeedKmh = car.speed * 3.6;
+        const endSpeedKmh = Math.max(0, preHitSpeedKmh - TRUCK_HIT_SPEED_DAMAGE_KMH);
+        car.knockbackEndSpeed = endSpeedKmh / 3.6;
+
+        // [강제 액션] 트럭이 뚫고 나가는 방향(tc.heading) 그대로 플레이어를 세게 튕겨낸다.
+        car.knockbackHeading = tc.heading;
+        car.knockbackSpeed = TRUCK_KNOCKBACK_SPEED_MS;
+        car.knockbackTimer = TRUCK_KNOCKBACK_DURATION_SEC;
+        car.knockbackDuration = TRUCK_KNOCKBACK_DURATION_SEC;
+        car.collisionAccelBoostTimer = PLAYER_POST_COLLISION_ACCEL_SECONDS;
+      }
+    }
+
+    // 6) 체포 판정: "추격" 상태일 때만 유효(경찰차/헬기와 동일한 방식). 돌파 중에는 판정하지 않는다.
+    if (tc.state === 'chasing') {
+      const distToPlayerAfterMove = turf.distance(
+        turf.point([tc.lng, tc.lat]), turf.point([car.lng, car.lat]), { units: 'meters' }
+      );
+      if (distToPlayerAfterMove <= TRUCK_CATCH_RADIUS_METERS) {
+        anyTruckCatching = true;
+        catchSourcePos = { lat: tc.lat, lng: tc.lng, radiusMeters: TRUCK_CATCH_RADIUS_METERS, holdSeconds: TRUCK_CATCH_HOLD_SECONDS };
+      }
+    }
+
+    // 7) 돌파 상태에서 플레이어로부터 충분히 멀어지면(화면 밖으로 완전히 빠져나가면) 제거 대상으로 표시한다.
+    if (tc.state === 'breakthrough') {
+      const distFromPlayer = Math.hypot(dNorth, dEast);
+      if (distFromPlayer >= TRUCK_BREAKTHROUGH_DESPAWN_DIST_M) {
+        trucksToRemove.push(tc);
+      }
+    }
+  });
+
+  // 화면 밖으로 완전히 빠져나간 트럭을 지우고, 잠시 뒤 새 트럭이 다시 돌진해오도록 예약한다.
+  if (trucksToRemove.length > 0) {
+    trucksToRemove.forEach((tc) => {
+      tc.el.remove();
+      tc.circleEl.remove();
+    });
+    specialTrucks = specialTrucks.filter((tc) => !trucksToRemove.includes(tc));
+    if (truckRespawnTimer <= 0) truckRespawnTimer = TRUCK_RESPAWN_DELAY_SEC;
+  }
+
+  // 트럭 대수가 TRUCK_COUNT보다 모자라면(누군가 돌파해서 나갔다면), 일정 시간 뒤 그 자리를 채울
+  // 새 트럭을 다시 등장시킨다. (이 함수는 currentWave>=4이기만 하면 매 프레임 호출되므로, 트럭이
+  // 하나도 남지 않은 순간에도 재등장 타이머가 계속 흘러간다)
+  if (specialTrucks.length < TRUCK_COUNT) {
+    if (truckRespawnTimer > 0) {
+      truckRespawnTimer = Math.max(0, truckRespawnTimer - dt);
+      if (truckRespawnTimer <= 0) {
+        spawnOneSpecialTruck(Math.random() * 360);
+      }
+    } else {
+      truckRespawnTimer = TRUCK_RESPAWN_DELAY_SEC;
+    }
+  }
+
+  truckCatchingPlayer = anyTruckCatching;
+}
+
+
+// 플레이어 근처(minDist~maxDist, m) 도로 위의 한 지점을 찾는다. 못 찾으면 플레이어가 서 있는 도로 근처로 폴백.
+// (경찰차 최초 스폰, 트럭 스폰 로직과 동일한 탐색 방식 - 민간 차량 스폰/재배치에 공용으로 사용)
+function findNearPlayerRoadSpot(minDist, maxDist) {
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos(car.lat * Math.PI / 180);
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const tryBearing = Math.random() * 360;
+    const tryDist = minDist + Math.random() * (maxDist - minDist);
+    const bearingRad = tryBearing * Math.PI / 180;
+    const tryLat = car.lat + (tryDist * Math.cos(bearingRad)) / metersPerDegLat;
+    const tryLng = car.lng + (tryDist * Math.sin(bearingRad)) / metersPerDegLng;
+    const roadInfo = findRoadPointNear(tryLat, tryLng, 35);
+    if (roadInfo) {
+      return { lat: roadInfo.lat, lng: roadInfo.lng, bearingDeg: tryBearing };
+    }
+  }
+  const fallback = findRoadPointNear(car.lat, car.lng, 200) || { lat: car.lat, lng: car.lng };
+  return { lat: fallback.lat, lng: fallback.lng, bearingDeg: car.heading };
+}
+
+// 웨이브6부터 등장하는 "길막" 민간 차량(녹색)을 플레이어 아주 가까운 도로 위에 배치한다.
+// - 경찰차/트럭과 달리 추격·체포 개념이 전혀 없다: 그냥 자기 갈 길 가는 민간 차량일 뿐이며,
+//   플레이어와 우연히 부딪히면 서로 튕겨나가는 "길막" 역할만 한다.
+function spawnCivilianBlocker() {
+  if (civilianBlocker) return; // 이미 있다면 중복 생성하지 않음
+  const layer = document.getElementById('police-layer');
+  const spot = findNearPlayerRoadSpot(CIVILIAN_SPAWN_MIN_DIST_M, CIVILIAN_SPAWN_MAX_DIST_M);
+
+  const el = document.createElement('div');
+  el.className = 'civilian-car';
+  // 경찰차와 같은 차체 모양이되, 경광등 없이 녹색으로만 칠해서 "일반 민간 차량"임을 드러낸다.
+  el.innerHTML = `
+    <svg viewBox="0 0 34 58">
+      <path d="M17 1 C25 1 30 8 30 18 L30 46 C30 53 25 57 17 57 C9 57 4 53 4 46 L4 18 C4 8 9 1 17 1 Z"
+            fill="#2e9e44" stroke="#155c26" stroke-width="1.5"/>
+      <rect x="8" y="12" width="18" height="14" rx="3" fill="#1a2733" opacity="0.85"/>
+      <rect x="8" y="34" width="18" height="12" rx="3" fill="#1a2733" opacity="0.6"/>
+    </svg>`;
+  layer.appendChild(el);
+
+  civilianBlocker = {
+    lat: spot.lat, lng: spot.lng, heading: spot.bearingDeg, speed: 0,
+    el,
+    lastGoodLat: spot.lat, lastGoodLng: spot.lng,
+    wanderHeading: spot.bearingDeg,
+    wanderTimer: POLICE_WANDER_MIN_INTERVAL_SEC + Math.random() * (POLICE_WANDER_MAX_INTERVAL_SEC - POLICE_WANDER_MIN_INTERVAL_SEC),
+    route: null,          // 도로 그래프를 따라가는 현재 경로(웨이포인트 배열). 없으면 wander로 대체
+    routeIndex: 0,
+    routeRecalcTimer: 0,  // 0 이하가 되면 새로운 무작위 목적지를 다시 정함
+    wasCollidingWithPlayer: false,
+    collisionCooldownTimer: 0,
+    knockbackTimer: 0,
+    knockbackHeading: 0,
+    knockbackSpeed: 0,
+  };
+}
+
+// 민간 길막 차량 DOM을 지우고 상태를 초기화한다.
+function removeCivilianBlocker() {
+  if (civilianBlocker) {
+    civilianBlocker.el.remove();
+    civilianBlocker = null;
+  }
+}
+
+// 민간 길막 차량의 이동(도로 그래프를 따라 자유 주행) + 플레이어와의 충돌(맞박치기) 판정을 처리한다.
+// - 발각/추격/체포 개념이 전혀 없는, 순수한 "지나가던 일반 차량"이다.
+// - 플레이어와 몸통이 맞닿으면 경찰차와 동일한 방식으로 서로 반대쪽 대각선으로 튕겨나간다(길막 효과).
+// - 플레이어에게서 너무 멀어지면(CIVILIAN_RESPAWN_DIST_M) 계속 "근처의 교통"으로 남아있도록
+//   플레이어 근처 도로로 재배치한다(멀리 가버려서 다시는 안 보이는 상황을 방지).
+function updateCivilianBlocker(dt, now) {
+  const cc = civilianBlocker;
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos(car.lat * Math.PI / 180);
+
+  // 0) 플레이어와 너무 멀어졌으면, "길막"으로서의 존재감을 유지하도록 플레이어 근처로 재배치
+  const distFromPlayer = turf.distance(turf.point([cc.lng, cc.lat]), turf.point([car.lng, car.lat]), { units: 'meters' });
+  if (distFromPlayer > CIVILIAN_RESPAWN_DIST_M) {
+    const spot = findNearPlayerRoadSpot(CIVILIAN_SPAWN_MIN_DIST_M, CIVILIAN_SPAWN_MAX_DIST_M);
+    cc.lat = spot.lat; cc.lng = spot.lng; cc.heading = spot.bearingDeg;
+    cc.lastGoodLat = spot.lat; cc.lastGoodLng = spot.lng;
+    cc.speed = 0;
+    cc.route = null; cc.routeIndex = 0; cc.routeRecalcTimer = 0;
+    cc.knockbackTimer = 0;
+  }
+
+  // 넉백(충돌로 튕겨나가는 중)인 동안은 나머지 로직을 전부 건너뛰고, 강제로 밀려나는 이동만 처리한다.
+  if (cc.knockbackTimer > 0) {
+    cc.knockbackTimer = Math.max(0, cc.knockbackTimer - dt);
+    const kt = cc.knockbackTimer / KNOCKBACK_DURATION_SEC; // 1 → 0으로 이즈아웃
+    cc.speed = cc.knockbackSpeed * kt;
+    cc.heading = cc.knockbackHeading;
+    const headingRad = cc.heading * Math.PI / 180;
+    cc.lat += (cc.speed * dt * Math.cos(headingRad)) / metersPerDegLat;
+    cc.lng += (cc.speed * dt * Math.sin(headingRad)) / metersPerDegLng;
+    if (cc.knockbackTimer <= 0) cc.speed = 0;
+
+    const screenPtKb = map.project([cc.lng, cc.lat]);
+    cc.el.style.transform = `translate(${screenPtKb.x - 7}px, ${screenPtKb.y - 12}px) rotate(${cc.heading}deg)`;
+    if (cc.collisionCooldownTimer > 0) cc.collisionCooldownTimer -= dt;
+    cc.wasCollidingWithPlayer = false; // 넉백이 끝난 뒤 다음 정상 프레임에 충돌 여부를 새로 감지하게 함
+    return;
+  }
+
+  const civSpeedTarget = car.maxForwardSpeed * CIVILIAN_SPEED_FACTOR;
+  const maxTurn = POLICE_STEER_RATE_DEG_PER_SEC * dt;
+
+  // 1) 속도: 목표 속도(평범한 교통 흐름 속도)를 향해 가속/감속
+  if (cc.speed < civSpeedTarget) cc.speed = Math.min(civSpeedTarget, cc.speed + car.accel * dt);
+  else if (cc.speed > civSpeedTarget) cc.speed = Math.max(civSpeedTarget, cc.speed - car.accel * dt);
+
+  // 2) 조향: 실제 도로망(그래프)을 따라가는 무작위 목적지로 이동(트럭과 동일한 방식)
+  let desiredBearing;
+  cc.routeRecalcTimer -= dt;
+  const needsNewRoute = !cc.route || cc.routeIndex >= cc.route.length || cc.routeRecalcTimer <= 0;
+  if (needsNewRoute) {
+    const graph = buildRoadGraph();
+    let path = null;
+    if (graph && graph.nodeCoord.size > 0) {
+      const keys = Array.from(graph.nodeCoord.keys());
+      const randKey = keys[Math.floor(Math.random() * keys.length)];
+      const target = graph.nodeCoord.get(randKey);
+      path = findRoutePath(graph, cc.lng, cc.lat, target[0], target[1], CIVILIAN_ROUTE_START_SNAP_MAX_M);
+    }
+    cc.route = path; // 못 찾으면 null → 아래에서 wander 방식으로 자동 대체(안전장치)
+    cc.routeIndex = 0;
+    cc.routeRecalcTimer = CIVILIAN_ROUTE_RECALC_INTERVAL_SEC;
+  }
+
+  if (cc.route && cc.routeIndex < cc.route.length) {
+    let target = cc.route[cc.routeIndex];
+    let dToTarget = turf.distance(turf.point([cc.lng, cc.lat]), turf.point(target), { units: 'meters' });
+    while (dToTarget <= CIVILIAN_ROUTE_WAYPOINT_ARRIVE_M && cc.routeIndex < cc.route.length - 1) {
+      cc.routeIndex++;
+      target = cc.route[cc.routeIndex];
+      dToTarget = turf.distance(turf.point([cc.lng, cc.lat]), turf.point(target), { units: 'meters' });
+    }
+    desiredBearing = turf.bearing(turf.point([cc.lng, cc.lat]), turf.point(target));
+  } else {
+    cc.wanderTimer -= dt;
+    if (cc.wanderTimer <= 0) {
+      cc.wanderHeading = cc.heading + (Math.random() * 2 - 1) * POLICE_WANDER_TURN_RANGE_DEG;
+      cc.wanderTimer = POLICE_WANDER_MIN_INTERVAL_SEC + Math.random() * (POLICE_WANDER_MAX_INTERVAL_SEC - POLICE_WANDER_MIN_INTERVAL_SEC);
+    }
+    desiredBearing = cc.wanderHeading;
+  }
+  let hdiff = desiredBearing - cc.heading;
+  hdiff = ((hdiff + 540) % 360) - 180;
+  cc.heading = (cc.heading + Math.max(-maxTurn, Math.min(maxTurn, hdiff)) + 360) % 360;
+
+  // 3) 후보 위치 계산 후, 도로 위인지 확인해서 벗어나면 도로 쪽으로 보정(경찰차/트럭과 동일한 방식)
+  let headingRad = cc.heading * Math.PI / 180;
+  let candLat = cc.lat + (cc.speed * dt * Math.cos(headingRad)) / metersPerDegLat;
+  let candLng = cc.lng + (cc.speed * dt * Math.sin(headingRad)) / metersPerDegLng;
+
+  const roadInfo = findRoadPointNear(candLat, candLng, OFFROAD_DETECT_RANGE_METERS);
+  const onRoad = roadInfo && roadInfo.dist <= ROAD_HALF_WIDTH_METERS * 3;
+  const hardBlocked = roadInfo && roadInfo.dist > OFFROAD_HARD_BLOCK_METERS;
+
+  if (!onRoad) {
+    const targetLng = roadInfo ? roadInfo.lng : cc.lastGoodLng;
+    const targetLat = roadInfo ? roadInfo.lat : cc.lastGoodLat;
+    const toRoadBearing = turf.bearing(turf.point([candLng, candLat]), turf.point([targetLng, targetLat]));
+    let hd2 = toRoadBearing - cc.heading;
+    hd2 = ((hd2 + 540) % 360) - 180;
+    cc.heading = (cc.heading + Math.max(-maxTurn, Math.min(maxTurn, hd2)) + 360) % 360;
+
+    if (hardBlocked) {
+      candLat = cc.lat;
+      candLng = cc.lng;
+    } else {
+      headingRad = cc.heading * Math.PI / 180;
+      candLat = cc.lat + (cc.speed * dt * Math.cos(headingRad)) / metersPerDegLat;
+      candLng = cc.lng + (cc.speed * dt * Math.sin(headingRad)) / metersPerDegLng;
+    }
+  } else {
+    cc.lastGoodLat = candLat;
+    cc.lastGoodLng = candLng;
+  }
+  cc.lat = candLat;
+  cc.lng = candLng;
+
+  // 4) 화면 좌표로 변환해서 아이콘 위치/각도 갱신
+  const screenPt = map.project([cc.lng, cc.lat]);
+  cc.el.style.transform = `translate(${screenPt.x - 7}px, ${screenPt.y - 12}px) rotate(${cc.heading}deg)`;
+
+  // 5) 플레이어와의 충돌(맞박치기) 판정: 경찰차와 동일한 방식(둘 다 서로 반대편 대각선으로 튕겨나감)
+  if (cc.collisionCooldownTimer > 0) cc.collisionCooldownTimer -= dt;
+
+  const playerScreenPt = map.project([car.lng, car.lat]);
+  const ccScreenPtForHit = map.project([cc.lng, cc.lat]);
+  const hitPixelDist = Math.hypot(playerScreenPt.x - ccScreenPtForHit.x, playerScreenPt.y - ccScreenPtForHit.y);
+  const isPlayerCollision = hitPixelDist <= CAR_ICON_HIT_RADIUS_PX * 2;
+
+  if (isPlayerCollision && !cc.wasCollidingWithPlayer && cc.collisionCooldownTimer <= 0) {
+    // 방금 충돌한 순간 → 경찰차와 완전히 동일한 방식으로, 서로 반대쪽 대각선 뒤로 튕겨나간다.
+    const headingRadNow = cc.heading * Math.PI / 180;
+    const dNorth = (car.lat - cc.lat) * metersPerDegLat;
+    const dEast = (car.lng - cc.lng) * metersPerDegLng;
+    const perp = -dNorth * Math.sin(headingRadNow) + dEast * Math.cos(headingRadNow);
+    const side = perp >= 0 ? 1 : -1;
+
+    const playerKnockHeading = (car.heading + 180 + side * KNOCKBACK_ANGLE_DEG + 360) % 360;
+    const civKnockHeading = (cc.heading + 180 - side * KNOCKBACK_ANGLE_DEG + 360) % 360;
+
+    car.speed = 0;
+    car.heading = playerKnockHeading;
+    car.knockbackHeading = playerKnockHeading;
+    car.knockbackSpeed = KNOCKBACK_SPEED_MS;
+    car.knockbackTimer = KNOCKBACK_DURATION_SEC;
+    car.knockbackDuration = KNOCKBACK_DURATION_SEC;
+    car.knockbackEndSpeed = 0; // 민간 차량 충돌도 완전 정지까지 이즈아웃
+    car.collisionAccelBoostTimer = PLAYER_POST_COLLISION_ACCEL_SECONDS;
+
+    cc.speed = 0;
+    cc.heading = civKnockHeading;
+    cc.knockbackHeading = civKnockHeading;
+    cc.knockbackSpeed = KNOCKBACK_SPEED_MS;
+    cc.knockbackTimer = KNOCKBACK_DURATION_SEC;
+    cc.route = null;
+    cc.routeIndex = 0;
+    cc.routeRecalcTimer = 0;
+
+    // 즉시 서로를 최소 거리만큼 떨어뜨려서, 겹쳐진 채로 다음 프레임을 맞이하지 않게 한다.
+    const sepRad = playerKnockHeading * Math.PI / 180;
+    car.lat += (Math.cos(sepRad) * KNOCKBACK_SEPARATION_M) / metersPerDegLat;
+    car.lng += (Math.sin(sepRad) * KNOCKBACK_SEPARATION_M) / metersPerDegLng;
+    const sepRadCc = civKnockHeading * Math.PI / 180;
+    cc.lat += (Math.cos(sepRadCc) * KNOCKBACK_SEPARATION_M) / metersPerDegLat;
+    cc.lng += (Math.sin(sepRadCc) * KNOCKBACK_SEPARATION_M) / metersPerDegLng;
+
+    cc.collisionCooldownTimer = POLICE_COLLISION_HIT_COOLDOWN_SEC;
+  }
+  cc.wasCollidingWithPlayer = isPlayerCollision;
+}
+
+// 스파이크 스트립 하나를 플레이어 주변의 무작위 방향/거리에 있는 도로 위에 배치한다.
+function spawnSpikeStrip() {
+  const layer = document.getElementById('police-layer');
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos(car.lat * Math.PI / 180);
+
+  let lat = null, lng = null;
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const tryBearing = Math.random() * 360;
+    const tryDist = SPIKE_STRIP_MIN_DIST_M + Math.random() * (SPIKE_STRIP_MAX_DIST_M - SPIKE_STRIP_MIN_DIST_M);
+    const bearingRad = tryBearing * Math.PI / 180;
+    const tryLat = car.lat + (tryDist * Math.cos(bearingRad)) / metersPerDegLat;
+    const tryLng = car.lng + (tryDist * Math.sin(bearingRad)) / metersPerDegLng;
+
+    const roadInfo = findRoadPointNear(tryLat, tryLng, 35);
+    if (roadInfo) {
+      lat = roadInfo.lat;
+      lng = roadInfo.lng;
+      break;
+    }
+  }
+  if (lat === null) {
+    const fallback = findRoadPointNear(car.lat, car.lng, 200) || { lat: car.lat, lng: car.lng };
+    lat = fallback.lat;
+    lng = fallback.lng;
+  }
+
+  const el = document.createElement('div');
+  el.className = 'spike-strip';
+  el.innerHTML = `
+    <svg viewBox="0 0 44 20">
+      <rect x="1" y="8" width="42" height="5" rx="2" fill="#caa23a" stroke="#5c4a1a" stroke-width="1"/>
+      <polygon points="5,8 8,1 11,8" fill="#e8e8e8" stroke="#888" stroke-width="0.5"/>
+      <polygon points="15,8 18,1 21,8" fill="#e8e8e8" stroke="#888" stroke-width="0.5"/>
+      <polygon points="25,8 28,1 31,8" fill="#e8e8e8" stroke="#888" stroke-width="0.5"/>
+      <polygon points="35,8 38,1 41,8" fill="#e8e8e8" stroke="#888" stroke-width="0.5"/>
+    </svg>`;
+  layer.appendChild(el);
+
+  spikeStrips.push({ lat, lng, el, hitCooldownTimer: 0, wasOnPlayer: false });
+}
+
+// 웨이브5 시작 시, 스파이크 스트립을 SPIKE_STRIP_COUNT개 만큼 도로 곳곳에 뿌린다.
+function spawnSpikeStrips() {
+  for (let i = 0; i < SPIKE_STRIP_COUNT; i++) {
+    spawnSpikeStrip();
+  }
+}
+
+// 스파이크 스트립을 하나 다른 위치(플레이어 주변 도로)로 재배치한다.
+// - 한 번 밟혔거나, 플레이어에게서 너무 멀어졌을 때 호출해서 계속 "도로 곳곳에 뿌려진" 상태를 유지한다.
+function relocateSpikeStrip(strip) {
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos(car.lat * Math.PI / 180);
+  let lat = null, lng = null;
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const tryBearing = Math.random() * 360;
+    const tryDist = SPIKE_STRIP_MIN_DIST_M + Math.random() * (SPIKE_STRIP_MAX_DIST_M - SPIKE_STRIP_MIN_DIST_M);
+    const bearingRad = tryBearing * Math.PI / 180;
+    const tryLat = car.lat + (tryDist * Math.cos(bearingRad)) / metersPerDegLat;
+    const tryLng = car.lng + (tryDist * Math.sin(bearingRad)) / metersPerDegLng;
+
+    const roadInfo = findRoadPointNear(tryLat, tryLng, 35);
+    if (roadInfo) {
+      lat = roadInfo.lat;
+      lng = roadInfo.lng;
+      break;
+    }
+  }
+  if (lat !== null) {
+    strip.lat = lat;
+    strip.lng = lng;
+  }
+  strip.wasOnPlayer = false;
+}
+
+// 화면 위의 모든 스파이크 스트립 DOM을 지우고 배열을 비운다.
+function removeSpikeStrips() {
+  spikeStrips.forEach((s) => s.el.remove());
+  spikeStrips = [];
+}
+
+// 매 프레임 스파이크 스트립들의 화면 위치를 갱신하고, 플레이어가 밟았는지 확인해서
+// 밟았다면 순간적으로 속도를 -40km/h 깎은 뒤 다른 곳으로 재배치한다.
+function updateSpikeStrips(dt) {
+  spikeStrips.forEach((strip) => {
+    if (strip.hitCooldownTimer > 0) strip.hitCooldownTimer -= dt;
+
+    const screenPt = map.project([strip.lng, strip.lat]);
+    strip.el.style.transform = `translate(${screenPt.x - 13}px, ${screenPt.y - 6}px)`;
+
+    const distToPlayer = turf.distance(
+      turf.point([strip.lng, strip.lat]), turf.point([car.lng, car.lat]), { units: 'meters' }
+    );
+    const isOnPlayer = distToPlayer <= SPIKE_STRIP_TRIGGER_RADIUS_M;
+
+    if (isOnPlayer && !strip.wasOnPlayer && strip.hitCooldownTimer <= 0) {
+      // 방금 밟은 순간(직전 프레임까진 밟지 않았음) → 순간적으로 속도를 깎는다
+      if (car.speed > 0) {
+        car.speed = Math.max(0, car.speed - SPIKE_STRIP_SPEED_DROP_MS);
+      } else if (car.speed < 0) {
+        car.speed = Math.min(0, car.speed + SPIKE_STRIP_SPEED_DROP_MS);
+      }
+      strip.hitCooldownTimer = SPIKE_STRIP_HIT_COOLDOWN_SEC;
+      relocateSpikeStrip(strip); // 밟힌 스트립은 다른 곳으로 옮겨서 계속 도로 곳곳에 함정이 있게 유지
+    } else if (distToPlayer > SPIKE_STRIP_MAX_DIST_FROM_PLAYER_M) {
+      // 플레이어가 너무 멀리 가버렸으면, 마주칠 일이 없어지지 않도록 근처로 다시 뿌린다
+      relocateSpikeStrip(strip);
+    }
+    strip.wasOnPlayer = isOnPlayer;
+  });
+}
+
+// 웨이브6에서 등장하는 경찰 헬기를 하나 만들어 플레이어 주변 무작위 방향/거리에 배치한다.
+// 자동차/트럭과 달리 "도로 위인지"는 전혀 신경 쓰지 않는다(하늘에서 접근하므로).
+function spawnHelicopter(now) {
+  if (policeHelicopter) return; // 이미 있다면 중복 생성하지 않음
+  const layer = document.getElementById('police-layer');
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos(car.lat * Math.PI / 180);
+
+  const bearingDeg = Math.random() * 360;
+  const dist = HELICOPTER_SPAWN_MIN_DIST_M + Math.random() * (HELICOPTER_SPAWN_MAX_DIST_M - HELICOPTER_SPAWN_MIN_DIST_M);
+  const bearingRad = bearingDeg * Math.PI / 180;
+  const lat = car.lat + (dist * Math.cos(bearingRad)) / metersPerDegLat;
+  const lng = car.lng + (dist * Math.sin(bearingRad)) / metersPerDegLng;
+
+  const el = document.createElement('div');
+  el.className = 'police-helicopter';
+  el.innerHTML = `
+    <svg viewBox="0 0 40 40">
+      <line class="heli-rotor" x1="2" y1="4" x2="38" y2="4" stroke="#222" stroke-width="2"/>
+      <rect x="18" y="2" width="4" height="4" fill="#222"/>
+      <ellipse cx="20" cy="23" rx="9" ry="13" fill="#2b3038" stroke="#0d0f12" stroke-width="1.5"/>
+      <ellipse cx="20" cy="19" rx="6" ry="7" fill="#1a2733" opacity="0.85"/>
+      <rect class="police-light" x="15" y="31" width="10" height="4" rx="1.5" fill="#ff3b3b"/>
+      <rect x="18" y="35" width="4" height="4" fill="#222"/>
+    </svg>`;
+  layer.appendChild(el);
+
+  // 경찰차와 동일한 스타일(추격 모드 = 빨간 원)의 체포 판정 원을 헬기 전용으로 하나 만든다.
+  const circleEl = document.createElement('div');
+  circleEl.className = 'catch-circle mode-chase';
+  layer.appendChild(circleEl);
+
+  policeHelicopter = {
+    lat, lng, heading: bearingDeg, speed: 0,
+    el, circleEl,
+  };
+
+  // 등장을 알리는 사이렌 + "발각됨!" 배너를 재사용해 헬기 출동을 알린다.
+  playSirenBeep();
+  const bannerEl = document.getElementById('detected-warning');
+  if (bannerEl) {
+    bannerEl.textContent = '🚁 경찰 헬기 출동!';
+    bannerEl.style.display = 'block';
+    detectedWarningHideAt = now + DETECTED_WARNING_DURATION_MS;
+  }
+}
+
+// 헬기 DOM(아이콘 + 체포 판정 원)을 지우고 상태를 초기화한다.
+function removeHelicopter() {
+  if (policeHelicopter) {
+    policeHelicopter.el.remove();
+    policeHelicopter.circleEl.remove();
+    policeHelicopter = null;
+  }
+  helicopterCatchingPlayer = false;
+}
+
+// 경찰 헬기의 이동을 처리한다.
+// - 자동차/트럭과 달리 도로를 따라갈 필요가 없으므로, 길찾기나 도로 이탈 보정 없이
+//   매 프레임 플레이어를 향한 최단 직선 방향으로 그냥 곧장 날아간다(건물도 무시하고 통과).
+// - 대신 최고 속도는 항상 플레이어의 최고 속도보다 낮게 고정(HELICOPTER_SPEED_FACTOR < 1)해서,
+//   플레이어가 계속 최고 속도로 잘 도망치면 결국 따돌릴 수 있다.
+function updateHelicopter(dt, now) {
+  const hc = policeHelicopter;
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos(car.lat * Math.PI / 180);
+  // 웨이브3+ 배율(policeWaveSpeedMultiplier)은 일부러 적용하지 않는다 - 헬기가 배율까지 받으면
+  // 플레이어 최고 속도를 넘어설 수 있기 때문에, "플레이어보다 빠르지 않다"는 조건을 항상 지키기 위함.
+  const helicopterSpeed = car.maxForwardSpeed * HELICOPTER_SPEED_FACTOR;
+  const maxTurn = HELICOPTER_STEER_RATE_DEG_PER_SEC * dt;
+
+  // 1) 속도: 목표 속도(플레이어 최고 속도보다 살짝 느림)를 향해 가속/감속
+  if (hc.speed < helicopterSpeed) hc.speed = Math.min(helicopterSpeed, hc.speed + car.accel * dt);
+  else if (hc.speed > helicopterSpeed) hc.speed = Math.max(helicopterSpeed, hc.speed - car.accel * dt);
+
+  // 2) 조향: 언제나 플레이어가 있는 방향으로 곧장 조향(도로 여부와 무관)
+  const desiredBearing = turf.bearing(turf.point([hc.lng, hc.lat]), turf.point([car.lng, car.lat]));
+  let hdiff = desiredBearing - hc.heading;
+  hdiff = ((hdiff + 540) % 360) - 180;
+  hc.heading = (hc.heading + Math.max(-maxTurn, Math.min(maxTurn, hdiff)) + 360) % 360;
+
+  // 3) 위치 이동: 도로 스냅/이탈 판정 없이 자유롭게(하늘 위이므로) 직진 이동
+  const headingRad = hc.heading * Math.PI / 180;
+  hc.lat += (hc.speed * dt * Math.cos(headingRad)) / metersPerDegLat;
+  hc.lng += (hc.speed * dt * Math.sin(headingRad)) / metersPerDegLng;
+
+  // 4) 화면 좌표로 변환해서 헬기 아이콘과 체포 판정 원의 위치/크기를 갱신
+  const screenPt = map.project([hc.lng, hc.lat]);
+  hc.el.style.transform = `translate(${screenPt.x - 20}px, ${screenPt.y - 20}px) rotate(${hc.heading}deg)`;
+
+  const diameterPx = 2 * metersToScreenPixels(hc.lat, hc.lng, HELICOPTER_CATCH_RADIUS_METERS);
+  hc.circleEl.style.width = `${diameterPx}px`;
+  hc.circleEl.style.height = `${diameterPx}px`;
+  hc.circleEl.style.transform = `translate(${screenPt.x - diameterPx / 2}px, ${screenPt.y - diameterPx / 2}px)`;
+
+  // 5) 체포 판정: 이번 프레임 이동을 마친 뒤의 최종 위치 기준으로 판정(화면에 그려진 원과 정확히 일치시킴)
+  const distToPlayerAfterMove = turf.distance(
+    turf.point([hc.lng, hc.lat]), turf.point([car.lng, car.lat]), { units: 'meters' }
+  );
+  helicopterCatchingPlayer = distToPlayerAfterMove <= HELICOPTER_CATCH_RADIUS_METERS;
+  if (helicopterCatchingPlayer) {
+    catchSourcePos = { lat: hc.lat, lng: hc.lng, radiusMeters: HELICOPTER_CATCH_RADIUS_METERS, holdSeconds: HELICOPTER_CATCH_HOLD_SECONDS };
+  }
+}
+
+// 페이지를 새로고침하지 않고, 지정된 위치/방향에서 게임을 다시 시작한다.
+// (경찰차 초기화 → 자유 주행 카운트다운부터 다시 진행)
+// 페이지를 새로고침하지 않고, 지정된 위치/방향에서 게임을 다시 시작한다.
+// (경찰차 초기화 → 자유 주행 카운트다운부터 다시 진행)
+// keepProgress가 true면 "이어서 계속(탈출)" 버튼용: 점수와 웨이브를 그대로 유지한다.
+// keepProgress가 false(기본값)면 완전히 새로 시작하는 것이므로 점수/웨이브를 처음으로 되돌린다.
+function restartGameAt(lat, lng, heading, keepProgress = false) {
+  clearPoliceCars();
+
+  car.lat = lat;
+  car.lng = lng;
+  car.heading = heading;
+  car.speed = 0;
+  car.knockbackTimer = 0;
+  car.knockbackSpeed = 0;
+  car.knockbackEndSpeed = 0;
+  throttleMode = 'forward';
+  setThrottle('forward'); // 버튼 표시도 "전진"으로 동기화
+
+  // 이탈 패널티 상태 초기화
+  offroadPenaltyState = 'none';
+  offroadPenaltyTimer = 0;
+  wasOffRoad = false;
+
+  if (!keepProgress) {
+    // 완전히 새로 시작하는 경우에만 점수와 웨이브를 처음으로 되돌린다.
+    score = 0;
+    scoreHud.textContent = '점수: 0';
+
+    currentWave = 1;
+    policeWaveSpeedMultiplier = 1;
+    waveHud.textContent = '1웨이브';
+  }
+  // keepProgress가 true인 경우(이어서 계속) score/currentWave/policeWaveSpeedMultiplier와
+  // 그에 맞는 HUD 표시는 잡히기 직전 값 그대로 유지된다.
+
+  document.getElementById('catch-warning').style.display = 'none';
+  document.getElementById('caught-overlay').style.display = 'none';
+
+  map.jumpTo({ center: [car.lng, car.lat] }); // 다음 프레임을 기다리지 않고 즉시 화면 중심을 옮김
+
+  isCaught = false;
+  startPoliceCountdown(); // 자유 주행 카운트다운부터 다시 시작 (gameLoop는 계속 돌고 있으므로 별도 재시작 불필요)
+}
+
+document.getElementById('restart-here-btn').addEventListener('click', () => {
+  // "이어서 계속 (탈출)": 방금 붙잡힌 바로 그 위치에서, 점수와 웨이브를 그대로 유지한 채 다시 시작
+  restartGameAt(car.lat, car.lng, car.heading, true);
+});
+
+document.getElementById('restart-start-btn').addEventListener('click', () => {
+  // "현 지도에서 처음부터 다시 하기": 이번 세션이 시작된 위치(현재 위치/국내 랜덤/해외 수도 중
+  // 선택했던 곳)로 되돌아가서, 점수와 웨이브도 처음(0점/1웨이브)부터 다시 시작
+  restartGameAt(initialLat ?? car.lat, initialLng ?? car.lng, initialHeading, false);
+});
+
+document.getElementById('restart-main-btn').addEventListener('click', () => {
+  // 완전히 처음(위치 권한 화면)으로: 페이지를 새로고침한다
+  location.reload();
+});
+
+</script>
+</body>
+</html>
